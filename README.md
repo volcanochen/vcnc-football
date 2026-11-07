@@ -3,7 +3,7 @@
 只刷 **VCNC**（B 站 mid `432185343`，五人制足球实况 / 集锦）的 Android 沉浸式播放器。
 打开就是一条竖滑的比赛流，当前比赛的集锦自动无缝连播，镜头自动跟随球与持球人放大。
 
-> **版本 v0.2.1**（试验版，未上架应用商店）。2026-11-07 从 `volcanochen/H-Player` 的
+> **版本 v0.2.2**（试验版，未上架应用商店）。2026-11-07 从 `volcanochen/H-Player` 的
 > `vcnc-football` 分支拆出，改为本仓库独立维护。主工程 H-Player 是通用 B 站集锦播放器，
 > 两者互不依赖。
 
@@ -27,7 +27,7 @@
 | 算法可视化 | 把识别出的球 / 人 / 门 / 持球者 / 组合框 / 预测轨迹画在画面上，方便调参 |
 | 播放控制 | 左下角播放/暂停 + `0.5×` / `0.25×` / `0.125×` 慢动作；本场播完停住不自动跳场；左半屏上下滑调亮度、右半屏调音量 |
 | 续播与兜底 | 冷启动按 localStorage 回到上次那场比赛的片段与进度；feed 本地缓存应对断网 / 风控；设置里可填 `SESSDATA` 提高接口配额 |
-| **应用内更新** | 设置 → 「检查更新」→ 读本仓库 GitHub Releases → 显示版本与更新说明 → 下载 APK → 调系统安装器升级（v0.2.1 新增，下载走多源回退） |
+| **应用内更新** | 设置 → 「检查更新」→ 读本仓库 GitHub Releases → 显示版本与更新说明 → 下载 APK → 调系统安装器升级（v0.2.0 新增，v0.2.1 起多源回退，v0.2.2 起直达安装器） |
 
 ## 目录结构
 
@@ -104,6 +104,8 @@ python server.py     # 或双击 start.cmd
 `browser_download_url` → jsDelivr CDN（3 个域名）→ `api.github.com` 的 contents 接口（base64）
 顺序尝试，任一成功即用；写入前校验 APK 的 zip `PK` 头，避免把错误页当安装包。
 后两类源都读仓库 `release/` 下的同名 APK，所以**发布时必须把 APK 一起提交进仓库**。
+安装意图（v0.2.2）显式指向系统「软件包安装程序」，避免装了文件管理器的设备弹出
+「打开方式」让用户误选第三方程序导致安装不发生。
 
 因此**发布新版本时必须同时做三件事**：改 `AndroidManifest.xml` 的 `versionCode` / `versionName`、
 把带版本号的 APK 放进 `release/`、创建同名 tag 的 Release 并上传该 APK。
@@ -116,13 +118,13 @@ python server.py     # 或双击 start.cmd
 # 1. 改版本号（AndroidManifest.xml），构建
 bash android/build_apk.sh
 # 2. 归档产物 + 校验和 + 版本说明
-cp android/VCNC-Football.apk release/VCNC-Football-v0.2.1.apk
-#    写 release/v0.2.1.md，更新 release/SHA256SUMS.txt
+cp android/VCNC-Football.apk release/VCNC-Football-v0.2.2.apk
+#    写 release/v0.2.2.md，更新 release/SHA256SUMS.txt
 # 3. 提交、打 tag、推送
-git add -A && git commit -m "release: v0.2.1"
-git tag v0.2.1 && git push origin main --tags
+git add -A && git commit -m "release: v0.2.2"
+git tag v0.2.2 && git push origin main --tags
 # 4. 建 Release 并上传 APK（token 取自 git credential，不落盘）
-python scripts/make_release.py --tag v0.2.1
+python scripts/make_release.py --tag v0.2.2
 ```
 
 脚本会打印 Release 页面地址；若同名 Release 已存在则复用并覆盖上传资产。
@@ -154,6 +156,7 @@ python scripts/make_release.py --tag v0.2.1
 | 2026-11-07 | 重新构建 APK 并在 Note8 真机验证（feed 11 场、双 deck 正常解码、分屏放大镜/球圈/控制条工作） |
 | 2026-11-07 | 拆出本仓库独立维护，接入 GitHub Releases 应用内更新，发布 v0.2.0 |
 | 2026-11-07 | 真机发现 `github.com:443` 不可达导致「能检查、不能下载」，改为多源回退 + APK 魔数校验，发布 v0.2.1 |
+| 2026-11-07 | 真机升级时「打开方式」可能误选第三方文件管理器，改为显式指定系统安装器，发布 v0.2.2 |
 
 原始 3 个提交的历史仍保留在 `volcanochen/H-Player` 本地 `vcnc-football` 分支；
 本仓库为干净起点，不带实验视频与标注数据（原分支历史里有 222 MB 视频，超过 GitHub 单文件限制）。

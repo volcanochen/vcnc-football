@@ -1,9 +1,11 @@
 package com.hplayer;
 
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
@@ -248,6 +250,18 @@ public class UpdateChecker {
             Uri uri = Uri.parse("content://" + AUTHORITY + "/" + APK_NAME);
             Intent i = new Intent(Intent.ACTION_VIEW);
             i.setDataAndType(uri, "application/vnd.android.package-archive");
+            // 显式指向系统「软件包安装程序」。装了 ES File Explorer 之类文件管理器的设备
+            // 会弹出「打开方式」，用户一旦选错，content:// 拿不到授权且根本不会安装。
+            try {
+                List<ResolveInfo> ris = ctx.getPackageManager().queryIntentActivities(i, 0);
+                for (ResolveInfo ri : ris) {
+                    String pkg = ri.activityInfo.packageName;
+                    if (pkg != null && pkg.toLowerCase().contains("packageinstaller")) {
+                        i.setComponent(new ComponentName(pkg, ri.activityInfo.name));
+                        break;
+                    }
+                }
+            } catch (Exception ignore) { /* 找不到就退回隐式意图 */ }
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
             ctx.startActivity(i);
             if (listener != null) listener.onInstallStarted();

@@ -52,7 +52,7 @@
 │       └── res/
 ├── scripts/make_release.py              # 创建 GitHub Release 并上传 APK
 ├── release/                             # 每个版本的发布产物与说明（见 release/README.md）
-└── _test/cdp_eval.py                    # adb + Chrome DevTools 读 WebView 内部状态
+└── _test/                               # cdp_eval.py（adb + CDP 读 WebView 状态）、真机升级验证截图
 ```
 
 > **包名与 Java 包名不一致**：manifest 是 `com.vcncfootball`，Java 类仍在 `com.hplayer`，

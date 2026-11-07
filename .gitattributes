@@ -1,0 +1,10 @@
+# shell 脚本必须保持 LF，否则 Windows 检出后带 \r 会导致 bash 执行失败
+*.sh text eol=lf
+*.py text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.md text
+*.html text
+*.css text
+*.js text
+*.xml text

@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.vcncfootball"
+    android:versionCode="2"
+    android:versionName="0.2.0">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Android 8+ 允许应用请求安装 APK（应用内更新需要） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- 必须声明 targetSdkVersion：缺失时系统按 targetSdk=1 处理，App 会被塞进
+         屏幕兼容模式（COMPATIBLE_WINDOW，320dp 小窗口拉伸到全屏），
+         表现为 UI 整体放大 2~3 倍、WebView CSS 视口只剩 ~125px、点击坐标错位。 -->
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34" />
+
+    <application
+        android:allowBackup="true"
+        android:label="VCNC足球沉浸场"
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:theme="@style/Theme.HPlayer">
+
+        <activity
+            android:name="com.hplayer.MainActivity"
+            android:exported="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden|keyboard|navigation|uiMode|layoutDirection|fontScale|locale|mcc|mnc|fontScale"
+            android:launchMode="singleTop">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- 系统分享面板里选本应用（B 站「分享」→ 复制链接/分享到此）。
+                 外屏（折叠屏 cover display）用的是另一套 Sharesheet，实测它会以
+                 text/html 或 text/uri-list 而不是 text/plain 发起分享，
+                 所以这几种 MIME 都要声明，否则外屏分享时本应用根本不出现在候选里。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/html" />
+                <data android:mimeType="text/uri-list" />
+                <data android:mimeType="application/x-bilibili" />
+            </intent-filter>
+
+            <!-- 部分机型分享卡片时用 SEND_MULTIPLE 带缩略图+文本 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+
+            <!-- 无 MIME 约束的兜底：某些 ROM 的外屏分享面板不带 type -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+
+            <!-- 深度链接：直接点开 B 站视频链接时调起本应用 -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="www.bilibili.com" android:pathPrefix="/video/" />
+                <data android:scheme="https" android:host="bilibili.com" android:pathPrefix="/video/" />
+                <data android:scheme="https" android:host="m.bilibili.com" android:pathPrefix="/video/" />
+                <data android:scheme="http" android:host="www.bilibili.com" android:pathPrefix="/video/" />
+                <data android:scheme="http" android:host="m.bilibili.com" android:pathPrefix="/video/" />
+                <data android:scheme="https" android:host="b23.tv" />
+                <data android:scheme="http" android:host="b23.tv" />
+            </intent-filter>
+
+            <!-- B 站 App 内部「跳转」用的 bilibili:// 深链（部分机型分享/跳转走此scheme）。
+                 显式声明，避免依赖其它 filter 的意外匹配。
+                 外屏分享实测会命中 bilibili://video/BVxxx 与
+                 bilibili://https://www.bilibili.com/video/BVxxx 两种形态。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="bilibili" android:host="video" />
+                <data android:scheme="bilibili" />
+            </intent-filter>
+        </activity>
+
+        <!-- 极简 ContentProvider：替代 AndroidX 的 FileProvider，用来向系统安装器
+             暴露下载到应用私有目录的更新 APK（不依赖任何外部支持库）。
+             grantUriPermissions=true 让安装器能临时读取 content:// URI。 -->
+        <provider
+            android:name="com.hplayer.UpdateProvider"
+            android:authorities="com.vcncfootball.update"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+
+</manifest>

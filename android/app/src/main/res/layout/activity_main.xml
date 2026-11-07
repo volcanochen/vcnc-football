@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/bg">
+
+    <!-- 简化后的顶栏：返回 + 标题 + 全屏（不再放"打开B站/粘贴链接"，分享/短链在 main/Activity 里处理） -->
+    <LinearLayout
+        android:id="@+id/topbar"
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:orientation="horizontal"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp"
+        android:gravity="center_vertical"
+        android:background="#18191c">
+
+        <Button
+            android:id="@+id/btnBack"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:maxLines="1"
+            android:textSize="13sp"
+            android:textColor="#fff"
+            android:background="@android:color/transparent"
+            android:text="← 返回" />
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:text="B 站集锦"
+            android:textColor="#fff"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnTest"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:paddingStart="9dp"
+            android:paddingEnd="9dp"
+            android:maxLines="1"
+            android:textSize="13sp"
+            android:textColor="#fff"
+            android:background="@android:color/transparent"
+            android:text="测试视频" />
+
+        <Button
+            android:id="@+id/btnFull"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:paddingStart="9dp"
+            android:paddingEnd="9dp"
+            android:maxLines="1"
+            android:textSize="13sp"
+            android:textColor="#fff"
+            android:background="@android:color/transparent"
+            android:text="全屏" />
+    </LinearLayout>
+
+    <WebView
+        android:id="@+id/wv"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+</LinearLayout>

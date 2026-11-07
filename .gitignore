@@ -1,0 +1,35 @@
+# ---- 构建产物 ----
+android/build/
+android/app/build/
+android/app/src/main/assets/
+android/*.apk
+android/*.apk.idsig
+*.class
+*.dex
+*.jar
+
+# ---- 密钥（务必不要提交签名私钥）----
+android/keystore.jks
+*.jks
+*.keystore
+*.p12
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+*.iml
+Thumbs.db
+.DS_Store
+
+# ---- 运行时临时文件 ----
+_comments_raw.json
+*.log
+
+# ---- 测试产物 ----
+_test/out/
+
+# ---- 测试运行产物 ----
+_test/last_result.json
+_test/out/
+_test/__pycache__/
+__pycache__/

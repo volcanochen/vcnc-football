@@ -7,6 +7,7 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
+import android.util.Base64;
 import android.util.Log;
 
 import java.io.File;
@@ -14,6 +15,8 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 软件更新：从本仓库 GitHub Releases 取最新版 APK。
@@ -23,29 +26,42 @@ import java.net.URL;
  *      解析 tag_name / body / assets[].browser_download_url（找 .apk）
  *   2) 用「语义版本」(major.minor.patch) 比较最新版与当前 versionName，
  *      判断是否有更新（release 不带 versionCode，所以用版本名比较）
- *   3) 有更新则下载 APK 到 getFilesDir()/updates/，用自定义 UpdateProvider
+ *   3) 下载 APK 到 getFilesDir()/updates/，用自定义 UpdateProvider
  *      以 content:// 暴露给系统安装器触发安装
+ *
+ * 【为什么要多源下载】实测部分网络下 api.github.com 可达、github.com:443 却被拦，
+ * 导致「检查更新成功但下载必失败」。因此按以下顺序逐个尝试，任一成功即用：
+ *   a) Release 的 browser_download_url（境外 / 正常网络最快）
+ *   b) jsDelivr CDN 的三个域名，指向仓库 release/ 下同名 APK
+ *   c) api.github.com 的 contents 接口（返回 base64，走已确定可达的 API 域名）
+ * 发布时必须把与 Release 资产同名的 APK 提交到仓库 release/ 目录。
  *
  * 回调全部发生在子线程，调用方（MainActivity）需要切回 UI 线程再操作 WebView。
  */
 public class UpdateChecker {
 
     private static final String TAG = "VCNCFootball-Update";
-    private static final String API =
-            "https://api.github.com/repos/volcanochen/vcnc-football/releases/latest";
+    private static final String REPO = "volcanochen/vcnc-football";
+    private static final String API = "https://api.github.com/repos/" + REPO + "/releases/latest";
     private static final String AUTHORITY = "com.vcncfootball.update";
     private static final String APK_NAME = "VCNC-Football.apk";
+    private static final String[] CDN_HOSTS = {
+            "https://cdn.jsdelivr.net/gh/",
+            "https://fastly.jsdelivr.net/gh/",
+            "https://gcore.jsdelivr.net/gh/"
+    };
 
     private final Context ctx;
     private final UpdateListener listener;
     private final String curVersion;
-    private String lastApkUrl = null;
+    /** check() 生成的候选下载地址；downloadAndInstall() 按顺序尝试 */
+    private final List<String> lastUrls = new ArrayList<>();
 
     public interface UpdateListener {
-        /** 检查完成。hasUpdate 为 true 时 apkUrl 一定非空 */
+        /** 检查完成。hasUpdate 为 true 时下载地址一定非空 */
         void onChecked(boolean hasUpdate, String curVersion, String latestVersion,
                       String latestName, String notes, boolean apkAvailable);
-        /** 下载进度 0~100；<-1 表示未知长度 */
+        /** 下载进度 0~100 */
         void onProgress(int pct);
         /** 出错（网络/解析/权限等），msg 已是人话 */
         void onError(String msg);
@@ -87,7 +103,20 @@ public class UpdateChecker {
                 String latestVer = tag.startsWith("v") ? tag.substring(1) : tag;
                 String notes = str(body, "body");
                 String apk = findApk(body);
-                lastApkUrl = apk;
+
+                synchronized (lastUrls) {
+                    lastUrls.clear();
+                    if (apk != null && !apk.isEmpty()) {
+                        lastUrls.add(apk);
+                        String fileName = apk.substring(apk.lastIndexOf('/') + 1);
+                        for (String host : CDN_HOSTS) {
+                            lastUrls.add(host + REPO + "@" + tag + "/release/" + fileName);
+                        }
+                        // 兜底：API 域名在受限网络下通常仍可达；仓库 release/ 里有同名文件
+                        lastUrls.add("https://api.github.com/repos/" + REPO
+                                + "/contents/release/" + fileName + "?ref=" + tag);
+                    }
+                }
                 boolean has = apk != null && !apk.isEmpty() && compareVer(latestVer, curVersion) > 0;
                 if (listener != null) {
                     final boolean fHas = has;
@@ -96,17 +125,20 @@ public class UpdateChecker {
                     listener.onChecked(fHas, curVersion, fLv, fTag, fNotes, fApk);
                 }
             } catch (Exception e) {
-                emitError("检查更新失败：" + e.getMessage());
+                emitError("检查更新失败：" + shortMsg(e));
             }
         }).start();
     }
 
     public void downloadAndInstall() {
-        if (lastApkUrl == null || lastApkUrl.isEmpty()) {
-            emitError("没有可用的下载地址，请重新检查更新");
-            return;
+        final List<String> urls;
+        synchronized (lastUrls) {
+            if (lastUrls.isEmpty()) {
+                emitError("没有可用的下载地址，请重新检查更新");
+                return;
+            }
+            urls = new ArrayList<>(lastUrls);
         }
-        final String url = lastApkUrl;
         new Thread(() -> {
             File dir = new File(ctx.getFilesDir(), "updates");
             if (!dir.exists() && !dir.mkdirs()) {
@@ -114,39 +146,86 @@ public class UpdateChecker {
                 return;
             }
             File apk = new File(dir, APK_NAME);
-            try {
-                HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-                c.setConnectTimeout(15000);
-                c.setReadTimeout(60000);
-                c.setRequestProperty("User-Agent", "VCNC-Football");
-                int code = c.getResponseCode();
-                if (code != 200) {
-                    emitError("下载失败：HTTP " + code);
-                    c.disconnect();
-                    return;
-                }
-                int total = c.getContentLength();
-                InputStream in = c.getInputStream();
-                FileOutputStream out = new FileOutputStream(apk);
-                byte[] buf = new byte[8192];
-                int n, got = 0;
-                while ((n = in.read(buf)) > 0) {
-                    out.write(buf, 0, n);
-                    got += n;
-                    if (total > 0 && listener != null) {
-                        listener.onProgress(got * 100 / total);
+            StringBuilder errs = new StringBuilder();
+            for (int i = 0; i < urls.size(); i++) {
+                String url = urls.get(i);
+                try {
+                    Log.i(TAG, "try source " + (i + 1) + "/" + urls.size() + ": " + hostOf(url));
+                    if (listener != null) listener.onProgress(0);
+                    byte[] data = fetch(url);
+                    // APK 是 zip；拒绝把错误页 / HTML 当安装包交给系统安装器
+                    if (data.length < 1024 || data[0] != 'P' || data[1] != 'K') {
+                        throw new Exception("响应不是 APK（" + data.length + " bytes）");
                     }
+                    writeBytes(apk, data);
+                    if (listener != null) listener.onProgress(100);
+                    Log.i(TAG, "apk downloaded from " + hostOf(url) + ": " + data.length + " bytes");
+                    install(apk);
+                    return;
+                } catch (Exception e) {
+                    Log.w(TAG, "source failed " + hostOf(url) + ": " + e.getMessage());
+                    errs.append(hostOf(url)).append(": ").append(shortMsg(e)).append("; ");
                 }
-                out.close();
-                in.close();
-                c.disconnect();
-                if (listener != null) listener.onProgress(100);
-                Log.i(TAG, "apk downloaded: " + apk.length() + " bytes");
-                install(apk);
-            } catch (Exception e) {
-                emitError("下载失败：" + e.getMessage());
             }
+            emitError("下载失败（已试 " + urls.size() + " 个源）：" + errs);
         }).start();
+    }
+
+    /** 取回 APK 字节。contents 接口返回 JSON(base64)，其它源直接返回二进制。 */
+    private byte[] fetch(String url) throws Exception {
+        boolean isApiJson = url.contains("/contents/");
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setInstanceFollowRedirects(true);
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(25000);
+        c.setRequestProperty("User-Agent", "VCNC-Football");
+        if (isApiJson) c.setRequestProperty("Accept", "application/vnd.github+json");
+        try {
+            int code = c.getResponseCode();
+            if (code != 200) throw new Exception("HTTP " + code);
+            InputStream in = c.getInputStream();
+            if (isApiJson) {
+                String json = readString(in);
+                in.close();
+                String content = str(json, "content");
+                if (content.isEmpty()) throw new Exception("接口未返回文件内容");
+                byte[] out = Base64.decode(content.replaceAll("\\s", ""), Base64.DEFAULT);
+                if (listener != null) listener.onProgress(90);
+                return out;
+            }
+            int total = c.getContentLength();
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n, got = 0;
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+                got += n;
+                if (total > 0 && listener != null) {
+                    listener.onProgress(Math.min(99, got * 100 / total));
+                }
+            }
+            in.close();
+            return bos.toByteArray();
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    private static void writeBytes(File f, byte[] data) throws Exception {
+        File tmp = new File(f.getParentFile(), f.getName() + ".tmp");
+        FileOutputStream out = new FileOutputStream(tmp);
+        try { out.write(data); } finally { out.close(); }
+        if (f.exists() && !f.delete()) throw new Exception("无法删除旧 APK");
+        if (!tmp.renameTo(f)) throw new Exception("无法保存 APK");
+    }
+
+    private static String hostOf(String url) {
+        try { return new URL(url).getHost(); } catch (Exception e) { return url; }
+    }
+
+    private static String shortMsg(Exception e) {
+        String s = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+        return s.length() > 70 ? s.substring(0, 70) + "…" : s;
     }
 
     private void install(File apk) {
@@ -173,16 +252,14 @@ public class UpdateChecker {
             ctx.startActivity(i);
             if (listener != null) listener.onInstallStarted();
         } catch (Exception e) {
-            emitError("启动安装失败：" + e.getMessage());
+            emitError("启动安装失败：" + shortMsg(e));
         }
     }
 
     // ----------------------------- 解析辅助（不依赖 org.json，手写提取更稳） -----------------------------
 
     private static String str(String body, String key) {
-        // 找 "key":"value" 或 "key": "value"
-        String pat = "\"" + key + "\"\\s*:\\s*\"";
-        java.util.regex.Pattern p = java.util.regex.Pattern.compile(pat);
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile("\"" + key + "\"\\s*:\\s*\"");
         java.util.regex.Matcher m = p.matcher(body);
         if (!m.find()) return "";
         int s = m.end();
@@ -190,7 +267,6 @@ public class UpdateChecker {
         for (int i = s; i < body.length(); i++) {
             char ch = body.charAt(i);
             if (ch == '"') {
-                // 处理转义 \" ，但 && 不需要跨字符状态，简单处理：若前一个是 \ 则继续
                 if (i > s && body.charAt(i - 1) == '\\') { sb.append(ch); continue; }
                 break;
             }
@@ -200,7 +276,6 @@ public class UpdateChecker {
     }
 
     private static String findApk(String body) {
-        // assets 数组里找 "browser_download_url":"...apk"
         java.util.regex.Pattern p = java.util.regex.Pattern
                 .compile("\"browser_download_url\"\\s*:\\s*\"(https?://[^\"]+?\\.apk)\"");
         java.util.regex.Matcher m = p.matcher(body);

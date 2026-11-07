@@ -41,7 +41,8 @@ class WS:
         import socket
         import base64
         import os
-        self.s = socket.create_connection((host, int(port)), timeout=15)
+        # 页面里常有 await 轮询（等 feed 解析 / 等视频 ready），15s 会误超时
+        self.s = socket.create_connection((host, int(port)), timeout=90)
         key = base64.b64encode(os.urandom(16)).decode()
         req = (
             "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\n"

@@ -16,6 +16,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -37,11 +38,15 @@ public class ProxyServer extends Thread {
     private static volatile ProxyServer INSTANCE = null;
 
     private final Context ctx;
+    private final MediaCache cache;
     private ServerSocket ss;
     private int port = -1;
     public String baseUrl = null;
 
-    public ProxyServer(Context ctx) { this.ctx = ctx.getApplicationContext(); }
+    public ProxyServer(Context ctx) {
+        this.ctx = ctx.getApplicationContext();
+        this.cache = MediaCache.get(this.ctx);
+    }
 
     /** 进程级单例：首个调用者启动，之后复用（端口不变） */
     public static synchronized ProxyServer get(Context ctx) {
@@ -167,6 +172,17 @@ public class ProxyServer extends Thread {
             throws IOException {
         if ("/api/ping".equals(path)) {
             sendJson(os, 200, "{\"ok\":true,\"t\":" + System.currentTimeMillis() + "}");
+        } else if ("/api/cache/config".equals(path)) {
+            Map<String, String> q = parseQuery(query);
+            cache.setLimitMb(parseInt(q.get("mb"), MediaCache.DEFAULT_MB));
+            sendCacheStat(os);
+        } else if ("/api/cache/stat".equals(path)) {
+            sendCacheStat(os);
+        } else if ("/api/cache/clear".equals(path)) {
+            cache.clear();
+            sendCacheStat(os);
+        } else if ("/api/cache/prefetch".equals(path)) {
+            handlePrefetch(query, os);
         } else if ("/api/resolve".equals(path)) {
             Map<String, String> q = parseQuery(query);
             String raw = q.getOrDefault("url", "");
@@ -234,9 +250,74 @@ public class ProxyServer extends Thread {
         }
     }
 
-    private void handleMedia(OutputStream os, String token, String kind, int idx, String range)
+    private void sendCacheStat(OutputStream os) throws IOException {
+        try {
+            sendJson(os, 200, cache.stat().toString());
+        } catch (Exception e) {
+            sendJson(os, 200, "{\"ok\":false,\"error\":\"" + jsonEscape(e.getMessage()) + "\"}");
+        }
+    }
+
+    /**
+     * 媒体请求：优先走磁盘缓存（命中时一个字节都不用去 B 站拿）。
+     * key 用 bvid|page|qn|kind，与每次 resolve 都会变的 token 解耦，所以进程重启仍命中。
+     */
+    private void handleMedia(OutputStream os, String token, String kind, final int idx, String range)
             throws IOException {
-        BiliApi.MediaResult r = BiliApi.openMedia(token, kind, idx, range);
+        final String ctype = "v".equals(kind) ? "video/mp4" : "audio/mp4";
+        final String tk = token;
+        final String kd = kind;
+        String key = BiliApi.mediaCacheKey(token, kind);
+        MediaCache.Response cr = null;
+        if (key != null) {
+            try {
+                cr = cache.prepare(key, range, ctype, new MediaCache.Upstream() {
+                    @Override public BiliApi.MediaResult fetch(String rangeHeader) {
+                        return BiliApi.openMedia(tk, kd, idx, rangeHeader);
+                    }
+                });
+            } catch (Exception e) {
+                Log.w(TAG, "media cache prepare failed, passthrough: " + e.getMessage());
+                cr = null;
+            }
+        }
+        if (cr != null && !cr.passthrough) {
+            writeCached(os, cr);
+            return;
+        }
+        BiliApi.MediaResult r = (cr != null) ? cr.raw : BiliApi.openMedia(tk, kd, idx, range);
+        if (r == null) {
+            sendJson(os, 502, "{\"ok\":false,\"error\":\"流地址不可用\"}");
+            return;
+        }
+        writeProxied(os, r, ctype);
+    }
+
+    /** 缓存路径：本地磁盘读（或第一次的 tee 落盘） */
+    private void writeCached(OutputStream os, MediaCache.Response r) throws IOException {
+        StringBuilder head = new StringBuilder();
+        head.append("HTTP/1.1 206 Partial Content\r\n");
+        head.append("Access-Control-Allow-Origin: *\r\n");
+        head.append("Content-Type: ").append(r.contentType).append("\r\n");
+        head.append("Content-Range: bytes ").append(r.start).append('-').append(r.end)
+                .append('/').append(r.total > 0 ? r.total : "*").append("\r\n");
+        head.append("Content-Length: ").append(r.length).append("\r\n");
+        head.append("Accept-Ranges: bytes\r\n");
+        head.append("Cache-Control: public, max-age=86400\r\n");
+        head.append("Connection: close\r\n\r\n");
+        try {
+            os.write(head.toString().getBytes("UTF-8"));
+            os.flush();
+            r.writeTo(os);
+        } catch (IOException e) {
+            r.abort();
+            Log.w(TAG, "cache write aborted (client seek/stop): " + e.getMessage());
+        }
+    }
+
+    /** 原始透传路径：上游不给 206、token 无稳定 key、或缓存异常时的兜底 */
+    private void writeProxied(OutputStream os, BiliApi.MediaResult r, String defaultCtype)
+            throws IOException {
         if (r.stream == null) {
             int code = (r.status == 502) ? 502 : 404;
             sendJson(os, code, "{\"ok\":false,\"error\":" +
@@ -248,7 +329,7 @@ public class ProxyServer extends Thread {
         head.append("Access-Control-Allow-Origin: *\r\n");
         String ctype = r.contentType;
         if (ctype == null || (!ctype.startsWith("video/") && !ctype.startsWith("audio/")))
-            ctype = "v".equals(kind) ? "video/mp4" : "audio/mp4";
+            ctype = defaultCtype;
         head.append("Content-Type: ").append(ctype).append("\r\n");
         if (r.contentRange != null) head.append("Content-Range: ").append(r.contentRange).append("\r\n");
         if (r.contentLength >= 0) head.append("Content-Length: ").append(r.contentLength).append("\r\n");
@@ -350,6 +431,84 @@ public class ProxyServer extends Thread {
 
     private static int parseInt(String s, int def) {
         try { return s == null ? def : Integer.parseInt(s.trim()); } catch (Exception e) { return def; }
+    }
+
+    // ---------------------------------------------------------------- 集锦预取
+
+    /** 预取下载专用单线程：与播放争抢带宽时自动排队，不影响正在播的段 */
+    private final ExecutorService prefetchPool = Executors.newSingleThreadExecutor();
+    /** 预取按 4MB 切块：一块 = 一条缓存条目，也方便「已有条目覆盖就跳过」的增量判断 */
+    private static final long PREFETCH_CHUNK = 4L * 1024 * 1024;
+    /** 单次预取请求的块数上限：防止前端算错区间把整个视频拖下来 */
+    private static final int PREFETCH_MAX_CHUNKS = 400;
+
+    /**
+     * GET /api/cache/prefetch?token=..&kind=v&i=0&ranges=123-4567,890-12345
+     * ranges 是字节区间（前端按时长线性映射算出来），后台逐块落盘，立即返回排队摘要。
+     */
+    private void handlePrefetch(String query, OutputStream os) throws IOException {
+        Map<String, String> q = parseQuery(query);
+        final String token = q.getOrDefault("token", "");
+        final String kind = "a".equals(q.get("kind")) ? "a" : "v";
+        final int idx = parseInt(q.get("i"), 0);
+        String ranges = q.getOrDefault("ranges", "");
+        if (token.isEmpty() || ranges.isEmpty()) {
+            sendJson(os, 200, "{\"ok\":false,\"error\":\"缺少 token 或 ranges\"}");
+            return;
+        }
+        final String key = BiliApi.mediaCacheKey(token, kind);
+        final long[][] list = parseRanges(ranges);
+        if (key == null || list.length == 0) {
+            sendJson(os, 200, "{\"ok\":true,\"queued\":0,\"bytes\":0}");
+            return;
+        }
+        // 先算出计划字节数（同步），实际下载丢给后台线程
+        long planned = 0;
+        int chunks = 0;
+        outer:
+        for (long[] re : list) {
+            for (long s = re[0]; s <= re[1]; s += PREFETCH_CHUNK) {
+                long e = Math.min(re[1], s + PREFETCH_CHUNK - 1);
+                planned += e - s + 1;
+                if (++chunks >= PREFETCH_MAX_CHUNKS) break outer;
+            }
+        }
+        final long fPlanned = planned;
+        prefetchPool.execute(new Runnable() {
+            @Override public void run() {
+                long written = 0;
+                int done = 0;
+                outer:
+                for (long[] re : list) {
+                    for (long s = re[0]; s <= re[1]; s += PREFETCH_CHUNK) {
+                        long e = Math.min(re[1], s + PREFETCH_CHUNK - 1);
+                        long n = cache.prefetchRange(key, s, e, new MediaCache.Upstream() {
+                            @Override public BiliApi.MediaResult fetch(String range) {
+                                return BiliApi.openMedia(token, kind, idx, range);
+                            }
+                        });
+                        if (n > 0) written += n;
+                        if (++done >= PREFETCH_MAX_CHUNKS) break outer;
+                    }
+                }
+                Log.i(TAG, "cache prefetch kind=" + kind + " written=" + (written / 1048576L)
+                        + "MB / planned " + (fPlanned / 1048576L) + "MB");
+            }
+        });
+        sendJson(os, 200, "{\"ok\":true,\"queued\":" + chunks + ",\"bytes\":" + fPlanned + "}");
+    }
+
+    private static long[][] parseRanges(String s) {
+        ArrayList<long[]> out = new ArrayList<>();
+        for (String part : s.split(",")) {
+            String[] se = part.trim().split("-");
+            if (se.length != 2) continue;
+            try {
+                long a = Long.parseLong(se[0].trim()), b = Long.parseLong(se[1].trim());
+                if (b >= a && a >= 0 && b - a < 512L * 1024 * 1024) out.add(new long[]{a, b});
+            } catch (NumberFormatException ignore) {}
+        }
+        return out.toArray(new long[0][]);
     }
 
     private static String jsonEscape(String s) {

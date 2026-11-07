@@ -5,13 +5,20 @@ B 站集锦自动合成播放器 —— 本地服务（纯标准库，无第三�
 
 职责：
   /api/resolve?url=<BV或链接>&p=<分P>&qn=<画质>&cookie=<SESSDATA>   解析视频 + 取 DASH 流地址
-  /api/media/<token>/<v|a>                                          反向代理 upos 流（补 Referer/UA，透传 Range）
+  /api/media/<token>/<v|a>                                          反向代理 upos 流（补 Referer/UA，透传 Range + 磁盘缓存）
+  /api/cache/config?mb=<N>                                          设置缓存上限（默认 200MB）
+  /api/cache/stat                                                   缓存占用 / 命中统计
+  /api/cache/clear                                                  清空缓存
   /                                                                 托管 static/ 前端
+
+磁盘缓存在 _cache/media/（已 gitignore）：key 用 bvid|page|qn|v|a，与随机的 token 解耦，
+因此关掉进程再打开同一场比赛仍能命中；视频本身不会更新，缓存只需按上限做 LRU 淘汰。
 
 启动：python server.py [--no-open] [--port 8777]
 """
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -199,6 +206,277 @@ def bounded_range(rng: str | None) -> str:
 
 
 # --------------------------------------------------------------------------
+# 本地媒体磁盘缓存（与 Android MediaCache 同语义，桌面调试时行为一致）
+#   key = bvid|page|qn|kind，与每次 resolve 都会变的 token 解耦；
+#   一条缓存 = 一个 [start,end] 字节区间，命中只要求覆盖请求起点（206 回实际有的那段）；
+#   被 seek 打断时把已下载的连续前缀也落盘；未命中仍只发一次上游请求，不增加 CDN 请求数。
+# --------------------------------------------------------------------------
+CACHE_DIR = os.path.join(ROOT, "_cache", "media")
+CACHE_CONFIG = os.path.join(ROOT, "_cache", "config.json")
+CACHE_DEFAULT_MB, CACHE_MIN_MB, CACHE_MAX_MB = 600, 50, 2048
+CACHE_STATS = {"hits": 0, "misses": 0}
+
+
+def cache_limit_mb() -> int:
+    try:
+        with open(CACHE_CONFIG, "r", encoding="utf-8") as f:
+            v = int(json.load(f).get("limit_mb", CACHE_DEFAULT_MB))
+        if CACHE_MIN_MB <= v <= CACHE_MAX_MB:
+            return v
+    except Exception:
+        pass
+    return CACHE_DEFAULT_MB
+
+
+def cache_set_limit(mb) -> int:
+    v = max(CACHE_MIN_MB, min(CACHE_MAX_MB, int(mb)))
+    os.makedirs(os.path.dirname(CACHE_CONFIG), exist_ok=True)
+    with open(CACHE_CONFIG, "w", encoding="utf-8") as f:
+        json.dump({"limit_mb": v}, f)
+    cache_trim()
+    return v
+
+
+def cache_key_dir(key: str, create: bool = False) -> str:
+    d = os.path.join(CACHE_DIR, hashlib.md5(key.encode("utf-8")).hexdigest()[:20])
+    if create:
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
+def media_cache_key(entry: dict, kind: str):
+    bv = entry.get("bvid")
+    if not bv:
+        return None
+    return "%s|%s|%s|%s" % (bv, entry.get("page", 1), entry.get("qn", 80), kind)
+
+
+def cache_bounded(rng):
+    """与 bounded_range 同源，返回 (start, end) 闭区间供缓存条目标识使用。"""
+    m = re.match(r"bytes=(\d+)-(\d+)", bounded_range(rng))
+    return int(m.group(1)), int(m.group(2))
+
+
+def cache_find(key: str, s: int, e: int):
+    """找一条覆盖起点 s 的条目，返回 (文件, 条目起点, 实际可提供的末端)。
+
+    播放器常请求 3MB 却读一小段就断开，所以不要求完整覆盖请求；206 响应只回
+    Content-Range 里真实可用的那一段，播放器会自己接着请求后续字节。
+    """
+    d = cache_key_dir(key)
+    if not os.path.isdir(d):
+        return None
+    best = None
+    for n in os.listdir(d):
+        m = re.fullmatch(r"(\d+)_(\d+)\.bin", n)
+        if not m:
+            continue
+        s0, e0 = int(m.group(1)), int(m.group(2))
+        p = os.path.join(d, n)
+        if s0 > s or e0 < s:
+            continue
+        try:
+            if os.path.getsize(p) != e0 - s0 + 1:
+                continue
+        except OSError:
+            continue
+        avail_end = min(e0, e)
+        if avail_end < s:
+            continue
+        if best is None or avail_end > best[2]:
+            best = (p, s0, avail_end)
+    return best
+
+
+def cache_meta(key: str, name: str, default=""):
+    try:
+        with open(os.path.join(cache_key_dir(key), name), "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return default
+
+
+def cache_set_meta(key: str, name: str, val, only_once=False):
+    d = cache_key_dir(key, create=True)
+    p = os.path.join(d, name)
+    if only_once and os.path.isfile(p) and os.path.getsize(p) > 0:
+        return
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(str(val))
+    except OSError:
+        pass
+
+
+def cache_commit(key: str, s: int, e: int, total: int, tmp: str, written: int):
+    if written != e - s + 1:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return
+    d = cache_key_dir(key, create=True)
+    dst = os.path.join(d, "%d_%d.bin" % (s, e))
+    names = os.listdir(d)
+    for n in names:
+        m = re.fullmatch(r"(\d+)_(\d+)\.bin", n)
+        if m and int(m.group(1)) <= s and int(m.group(2)) >= e:
+            try:
+                if os.path.getsize(os.path.join(d, n)) == int(m.group(2)) - int(m.group(1)) + 1:
+                    os.remove(tmp)
+                    return
+            except OSError:
+                pass
+    for n in names:
+        m = re.fullmatch(r"(\d+)_(\d+)\.bin", n)
+        if m and n != os.path.basename(dst) and int(m.group(1)) >= s and int(m.group(2)) <= e:
+            try:
+                os.remove(os.path.join(d, n))
+            except OSError:
+                pass
+    try:
+        os.replace(tmp, dst)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return
+    if total:
+        cache_set_meta(key, "total", total)
+    cache_trim()
+
+
+def cache_files():
+    out = []
+    for root, _dirs, names in os.walk(CACHE_DIR):
+        for n in names:
+            if n.endswith(".bin"):
+                p = os.path.join(root, n)
+                try:
+                    out.append((os.path.getmtime(p), os.path.getsize(p), p))
+                except OSError:
+                    pass
+    return out
+
+
+# ---- 集锦片段预取（与 APK 端 /api/cache/prefetch 同语义） ----
+PREFETCH_CHUNK = 4 * 1024 * 1024      # 一块 = 一条缓存条目
+PREFETCH_MAX_CHUNKS = 400             # 单次请求块数上限，防止把整个视频拖下来
+_prefetch_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="prefetch")
+
+
+def cache_prefetch_range(key: str, s: int, e: int, urls: list[str]) -> int:
+    """主动预取一个字节区间：已有条目覆盖就跳过(0)，否则拉上游完整落盘；失败 -1。"""
+    if not key or e < s:
+        return 0
+    if cache_find(key, s, e):
+        return 0
+    headers = {
+        "User-Agent": UA,
+        "Referer": "https://www.bilibili.com/",
+        "Origin": "https://www.bilibili.com",
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+        "Range": "bytes=%d-%d" % (s, e),
+    }
+    if _LAST_COOKIE["value"]:
+        headers["Cookie"] = _LAST_COOKIE["value"]
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            upstream = urllib.request.urlopen(req, timeout=30)
+        except Exception:  # noqa: BLE001
+            continue
+        with upstream:
+            cr = upstream.headers.get("Content-Range") or ""
+            cm = re.search(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", cr)
+            if upstream.status != 206 or not cm or int(cm.group(1)) != s:
+                return -1
+            actual_end, total = int(cm.group(2)), 0 if cm.group(3) == "*" else int(cm.group(3))
+            ctype = upstream.headers.get("Content-Type") or ""
+            if ctype.startswith("video/") or ctype.startswith("audio/"):
+                cache_set_meta(key, "ctype", ctype, only_once=True)
+            d = cache_key_dir(key, create=True)
+            tmp = os.path.join(d, "%d.tmp" % time.time_ns())
+            written = 0
+            try:
+                with open(tmp, "wb") as f:
+                    while written < actual_end - s + 1:
+                        b = upstream.read(min(65536, actual_end - s + 1 - written))
+                        if not b:
+                            break
+                        f.write(b)
+                        written += len(b)
+            except OSError:
+                pass
+            if written <= 0:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                return -1
+            cache_commit(key, s, s + written - 1, total, tmp, written)
+            return written
+    return -1
+
+
+def cache_trim():
+    files = cache_files()
+    used = sum(x[1] for x in files)
+    limit = cache_limit_mb() * 1024 * 1024
+    if used <= limit:
+        return
+    for _mt, sz, p in sorted(files):
+        if used <= limit * 0.9:
+            break
+        try:
+            os.remove(p)
+            used -= sz
+        except OSError:
+            pass
+
+
+def cache_clear():
+    for root, dirs, names in os.walk(CACHE_DIR, topdown=False):
+        for n in names:
+            try:
+                os.remove(os.path.join(root, n))
+            except OSError:
+                pass
+        for n in dirs:
+            try:
+                os.rmdir(os.path.join(root, n))
+            except OSError:
+                pass
+    CACHE_STATS["hits"] = 0
+    CACHE_STATS["misses"] = 0
+
+
+def cache_stat() -> dict:
+    files = cache_files()
+    used = sum(x[1] for x in files)
+    limit = cache_limit_mb() * 1024 * 1024
+    videos = 0
+    if os.path.isdir(CACHE_DIR):
+        videos = sum(1 for n in os.listdir(CACHE_DIR)
+                     if os.path.isdir(os.path.join(CACHE_DIR, n)))
+    h, m = CACHE_STATS["hits"], CACHE_STATS["misses"]
+    return {
+        "ok": True,
+        "limitMb": cache_limit_mb(),
+        "limitBytes": limit,
+        "usedBytes": used,
+        "usedMb": round(used / 1048576, 1),
+        "entries": len(files),
+        "videos": videos,
+        "hits": h,
+        "misses": m,
+        "hitRate": round(h * 100 / (h + m), 1) if (h + m) else 0,
+    }
+
+
+# --------------------------------------------------------------------------
 # 解析视频
 # --------------------------------------------------------------------------
 def resolve(raw_target: str, page: int, qn: int, cookie_user: str) -> dict:
@@ -241,7 +519,10 @@ def resolve(raw_target: str, page: int, qn: int, cookie_user: str) -> dict:
 
     token = uuid.uuid4().hex
     with _lock:
-        MEDIA[token] = {"v": urls_of(vs), "a": urls_of(as_), "ts": time.time()}
+        MEDIA[token] = {
+            "v": urls_of(vs), "a": urls_of(as_), "ts": time.time(),
+            "bvid": v["bvid"], "page": page, "qn": qn,
+        }
         # 清理 2 小时前的旧 token
         for k in [k for k, val in MEDIA.items() if time.time() - val["ts"] > 7200]:
             MEDIA.pop(k, None)
@@ -437,6 +718,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_feed(qs)
             elif path.startswith("/api/media/"):
                 self.handle_media(path, qs)
+            elif path == "/api/cache/config":
+                try:
+                    mb = int((qs.get("mb") or [CACHE_DEFAULT_MB])[0] or CACHE_DEFAULT_MB)
+                except (TypeError, ValueError):
+                    mb = CACHE_DEFAULT_MB
+                cache_set_limit(mb)
+                self.send_json(cache_stat())
+            elif path == "/api/cache/stat":
+                self.send_json(cache_stat())
+            elif path == "/api/cache/clear":
+                cache_clear()
+                self.send_json(cache_stat())
+            elif path == "/api/cache/prefetch":
+                self.handle_cache_prefetch(qs)
             elif path == "/api/ping":
                 self.send_json({"ok": True, "t": time.time()})
             else:
@@ -462,6 +757,67 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(resolve(raw, page, qn, cookie))
         except Exception as exc:  # noqa: BLE001
             self.send_json({"ok": False, "error": str(exc)}, 200)
+
+    def handle_cache_prefetch(self, qs):
+        """GET /api/cache/prefetch?token=..&kind=v&i=0&ranges=1-2,3-4（字节区间）
+        后台逐块落盘，立即返回排队摘要。"""
+        token = (qs.get("token") or [""])[0]
+        kind = "a" if (qs.get("kind") or [""])[0] == "a" else "v"
+        try:
+            idx = int((qs.get("i") or ["0"])[0] or 0)
+        except (TypeError, ValueError):
+            idx = 0
+        ranges_raw = (qs.get("ranges") or [""])[0]
+        entry = MEDIA.get(token)
+        if not entry or not ranges_raw:
+            self.send_json({"ok": True, "queued": 0, "bytes": 0})
+            return
+        key = media_cache_key(entry, kind)
+        urls = (entry.get(kind) or [])[idx:] + (entry.get(kind) or [])[:idx]
+        ranges: list[tuple[int, int]] = []
+        for part in ranges_raw.split(","):
+            mm = re.fullmatch(r"(\d+)-(\d+)", part.strip())
+            if not mm:
+                continue
+            a, b = int(mm.group(1)), int(mm.group(2))
+            if b >= a and b - a < 512 * 1024 * 1024:
+                ranges.append((a, b))
+        if not key or not urls or not ranges:
+            self.send_json({"ok": True, "queued": 0, "bytes": 0})
+            return
+        planned, chunks = 0, 0
+        for a, b in ranges:
+            s = a
+            while s <= b:
+                e = min(b, s + PREFETCH_CHUNK - 1)
+                planned += e - s + 1
+                chunks += 1
+                if chunks >= PREFETCH_MAX_CHUNKS:
+                    break
+                s += PREFETCH_CHUNK
+            if chunks >= PREFETCH_MAX_CHUNKS:
+                break
+        fkey, franges, furls = key, ranges, urls
+
+        def work():
+            written, done = 0, 0
+            for a, b in franges:
+                s = a
+                while s <= b:
+                    e = min(b, s + PREFETCH_CHUNK - 1)
+                    n = cache_prefetch_range(fkey, s, e, furls)
+                    if n > 0:
+                        written += n
+                    done += 1
+                    if done >= PREFETCH_MAX_CHUNKS:
+                        return
+                    s += PREFETCH_CHUNK
+            if VERBOSE:
+                sys.stderr.write("[cache] prefetch %s written=%.1fMB / planned %.1fMB\n" % (
+                    kind, written / 1048576, planned / 1048576))
+
+        _prefetch_pool.submit(work)
+        self.send_json({"ok": True, "queued": chunks, "bytes": planned})
 
     def handle_feed(self, qs):
         offset = (qs.get("offset") or [""])[0]
@@ -490,20 +846,55 @@ class Handler(BaseHTTPRequestHandler):
         urls = urls[idx:] + urls[:idx]
 
         rng = self.headers.get("Range")
+        # 浏览器 seek 时发的是开区间 "bytes=N-"，统一收敛成 <=3MB 的有界区间
+        s, e = cache_bounded(rng)
         headers = {
             "User-Agent": UA,
             "Referer": "https://www.bilibili.com/",
             "Origin": "https://www.bilibili.com",
             "Accept": "*/*",
             "Accept-Encoding": "identity",
+            "Range": "bytes=%d-%d" % (s, e),
         }
         if _LAST_COOKIE["value"]:
             headers["Cookie"] = _LAST_COOKIE["value"]
+        key = media_cache_key(entry, kind)
 
-        # 关键：浏览器 seek 时发的是开区间 "bytes=N-"，照转等于把整个文件拖下来。
-        # 这里统一收敛成有界块（默认 3MB），让每次 seek 只取真正需要的一段。
-        up_range = bounded_range(rng)
-        headers["Range"] = up_range
+        # ---- 纯本地命中：一个字节都不用去 B 站拿 ----
+        if key:
+            hit = cache_find(key, s, e)
+            if hit:
+                fp, s0, hit_end = hit
+                length = hit_end - s + 1
+                total_sz = cache_meta(key, "total", "") or "*"
+                ctype = cache_meta(key, "ctype", "")
+                if not (ctype.startswith("video/") or ctype.startswith("audio/")):
+                    ctype = "video/mp4" if kind == "v" else "audio/mp4"
+                self.send_response(206)
+                self._cors()
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Range", "bytes %d-%d/%s" % (s, hit_end, total_sz))
+                self.send_header("Content-Length", str(length))
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                CACHE_STATS["hits"] += 1
+                try:
+                    with open(fp, "rb") as cf:
+                        cf.seek(s - s0)
+                        left = length
+                        while left > 0:
+                            b = cf.read(min(65536, left))
+                            if not b:
+                                break
+                            self.wfile.write(b)
+                            left -= len(b)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                if VERBOSE:
+                    sys.stderr.write("[media] CACHE HIT %s bytes=%d-%d\n" % (kind, s, e))
+                return
+            CACHE_STATS["misses"] += 1
 
         last_err = None
         for url in urls:
@@ -519,11 +910,27 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             with upstream:
                 status = upstream.status
-                self.send_response(status if status in (200, 206) else 200)
-                self._cors()
+                cr = upstream.headers.get("Content-Range") or ""
+                cm = re.search(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", cr)
+                total_len = 0 if (not cm or cm.group(3) == "*") else int(cm.group(3))
+                cacheable = bool(key) and status == 206 and bool(cm) and int(cm.group(1)) == s
                 ctype = upstream.headers.get("Content-Type") or ""
                 if not (ctype.startswith("video/") or ctype.startswith("audio/")):
                     ctype = "video/mp4" if kind == "v" else "audio/mp4"
+
+                # 未命中：边转发边写临时文件，写满或 seek 打断后按已下载前缀原子落盘
+                tmp, fout = None, None
+                if cacheable:
+                    try:
+                        d = cache_key_dir(key, create=True)
+                        tmp = os.path.join(d, "%d.tmp" % time.time_ns())
+                        fout = open(tmp, "wb")
+                        cache_set_meta(key, "ctype", ctype, only_once=True)
+                    except OSError:
+                        tmp, fout, cacheable = None, None, False
+
+                self.send_response(status if status in (200, 206) else 200)
+                self._cors()
                 self.send_header("Content-Type", ctype)
                 for h in ("Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"):
                     hv = upstream.headers.get(h)
@@ -541,9 +948,22 @@ class Handler(BaseHTTPRequestHandler):
                         if not chunk:
                             break
                         self.wfile.write(chunk)
+                        if fout:
+                            fout.write(chunk)
                         total += len(chunk)
                 except (BrokenPipeError, ConnectionResetError):
                     aborted = True
+                if fout:
+                    fout.close()
+                if tmp:
+                    if total > 0:
+                        # 读了多少就存多少：播放器 seek 打断时保留已下载的连续前缀
+                        cache_commit(key, s, s + total - 1, total_len, tmp, total)
+                    else:
+                        try:
+                            os.remove(tmp)
+                        except OSError:
+                            pass
             if VERBOSE:
                 sys.stderr.write("[media] %s client=%s up=%s cr=%s bytes=%d %.0fms%s\n" % (
                     kind, rng or "-", status, upstream.headers.get("Content-Range", "-"),

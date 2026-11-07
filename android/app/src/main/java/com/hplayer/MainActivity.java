@@ -421,6 +421,35 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 上次按返回的时间：两秒内按两次才真正退出 */
+    private long lastBackAt = 0;
+
+    /**
+     * 返回键语义（2026-11-08 反馈）：
+     *  1) 设置 / 比赛列表页 → 回播放页（JS handleAndroidBack 返回 1 = 已消费）；
+     *  2) 播放页 → 第一次 Toast「再按一次退出」，两秒内再按才真的退出。
+     */
+    @Override
+    public void onBackPressed() {
+        if (wv == null || !pageReady) { super.onBackPressed(); return; }
+        try {
+            final String expr = "typeof handleAndroidBack==='function' ? String(handleAndroidBack()) : '0'";
+            wv.evaluateJavascript(expr, value -> {
+                String v = value == null ? "0" : value.replace("\"", "").trim();
+                if ("1".equals(v)) return;                 // JS 已消费：侧页回播放页
+                long now = System.currentTimeMillis();
+                if (now - lastBackAt < 2000) {
+                    super.onBackPressed();
+                } else {
+                    lastBackAt = now;
+                    Toast.makeText(MainActivity.this, "再按一次退出", Toast.LENGTH_SHORT).show();
+                }
+            });
+        } catch (Exception e) {
+            super.onBackPressed();
+        }
+    }
+
     /** 当前 Activity 所在的 display id：内屏/外屏不同，用于日志确认分享来自哪块屏 */
     @SuppressWarnings("deprecation")
     private String getDisplayIdSafe() {
@@ -577,17 +606,21 @@ public class MainActivity extends Activity {
             // 完全无法判断是链接没传过来还是解析失败。现在把原始负载回传给页面显示，
             // 并给一个手动粘贴框兜底（外屏分享场景下系统可能根本不给链接）。
             //
-            // 注意只在【真的是分享/深链进来】时才提示：
-            // 从桌面图标启动（MAIN，无 extras）时没有链接是正常的，
-            // 此时弹"没识别到链接"会让人以为程序坏了。
-            boolean fromShare = !Intent.ACTION_MAIN.equals(a);
+            // 只有【真的收到 B 站分享/深链、但解析失败】才提示。
+            // VCNC 版本自带 UP 主动态 feed，从桌面图标启动、厂商 ROM 塞的无关 extras、
+            // 折叠屏/旋转时系统重发的 intent 都没有链接，属于正常启动；
+            // 旧版只看 action != MAIN 就弹「没识别到 B 站链接」，冷启动会误报。
+            boolean hasText = !merged.isEmpty();
+            boolean looksBili = hasText && merged.matches(
+                    "(?is).*(bilibili|b23\\.tv|BV[0-9a-z]{10}|av[0-9]+).*");
+            boolean fromShare = !Intent.ACTION_MAIN.equals(a) && hasText && looksBili;
             pendingBv = null;
             if (fromShare) {
                 final String rawForUser = merged.length() > 400 ? merged.substring(0, 400) + "…" : merged;
                 evalJs("showShareFallback && showShareFallback(" + jsQuote(rawForUser) + ");");
                 Toast.makeText(this, "没识别到 B 站链接，可在页面里粘贴", Toast.LENGTH_LONG).show();
             } else {
-                Log.i("HPlayer-Share", "MAIN 启动且无链接，属正常，不提示");
+                Log.i("HPlayer-Share", "MAIN 启动 / 无 B 站分享负载，属正常，不提示");
             }
             return;
         }

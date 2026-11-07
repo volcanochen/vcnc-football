@@ -8,119 +8,208 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2300aeec'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23fff' stroke-width='2'/%3E%3Cpath d='M16 4v5M16 23v5M4 16h5M23 16h5' stroke='%23fff' stroke-width='2'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="feed.css">
 </head>
-<body>
+<body data-page="1">
 
 <div id="appWrap">
-  <!-- 视频流容器：每个 .clip 一场比赛，JS 动态创建/回收 -->
-  <div id="feed"></div>
+  <!-- 三页容器：0 比赛列表 / 1 播放 / 2 设置；只通过顶部标签切换 -->
+  <div id="pager">
 
-  <!-- 亮度遮罩：左半屏上下滑动调节 -->
-  <div id="brightMask"></div>
+    <!-- ============ 第 0 页：播放列表（独立全屏页，纵向虚拟滚动） ============ -->
+    <section class="page page-list" id="pageList">
+      <div class="vlist" id="vlist">
+        <div class="vlist-head">
+          <span>选择比赛</span>
+          <span class="vlist-count" id="vlistCount"></span>
+          <button class="sheet-close" id="vlistClose" type="button" title="回到播放">▶</button>
+        </div>
+        <div class="vlist-body" id="vlistBody"><div class="vlist-canvas" id="vlistCanvas"></div></div>
+        <div class="vlist-foot" id="vlistFoot" hidden><button class="vlist-more" id="vlistMore" type="button">加载更多…</button></div>
+      </div>
+    </section>
 
-  <!-- 左下角控制条：播放/暂停 + 慢动作三档 -->
-  <div id="cornerCtl">
-    <button class="cbtn" id="btnPlay" aria-label="播放/暂停"></button>
-    <span class="csep"></span>
-    <button class="cbtn slow" data-rate="0.5">0.5×</button>
-    <button class="cbtn slow" data-rate="0.25">0.25×</button>
-    <button class="cbtn slow" data-rate="0.125">0.125×</button>
+    <!-- ============ 第 1 页：播放 ============ -->
+    <section class="page page-play" id="pagePlay">
+      <!-- 视频流容器：每个 .clip 一场比赛，JS 动态创建/回收 -->
+      <div id="feed"></div>
+
+      <!-- 集锦浮窗：靠左半透明，本场片段跳转 / 单段循环 -->
+      <div id="segFloat" class="segfloat">
+        <div class="sf-head">
+          <span class="sf-title">集锦</span>
+          <span class="sf-count" id="sfCount">—</span>
+          <button class="sf-fold" id="sfFold" type="button" title="收起/展开">‹</button>
+        </div>
+        <div class="sf-body" id="sfBody"></div>
+        <div class="sf-foot">
+          <span class="sf-state" id="sfState">点行跳转片段</span>
+        </div>
+      </div>
+
+      <!-- 亮度遮罩：左半屏上下滑动调节 -->
+      <div id="brightMask"></div>
+
+      <!-- 左下角控制条：倒放 + 播放/暂停 + 慢动作三档 -->
+      <div id="cornerCtl">
+        <button class="cbtn rev" id="btnRev" type="button" title="切换播放方向：▶ 正放 / ◀ 倒放" aria-label="切换播放方向">◀▶</button>
+        <button class="cbtn" id="btnPlay" aria-label="播放/暂停"></button>
+        <span class="csep"></span>
+        <button class="cbtn loop" id="btnLoop" type="button" title="锁定当前片段循环播放" aria-label="单片段循环">锁</button>
+        <span class="csep"></span>
+        <button class="cbtn slow" data-rate="0.5">0.5×</button>
+        <button class="cbtn slow" data-rate="0.25">0.25×</button>
+        <button class="cbtn slow" data-rate="0.125">0.125×</button>
+      </div>
+
+      <!-- 滑动调节 OSD（亮度/音量） -->
+      <div id="swipeOsd" hidden>
+        <div class="osd-track"><div class="osd-fill"></div></div>
+        <div class="osd-val"></div>
+      </div>
+
+      <!-- 横滑快进/回退 OSD -->
+      <div id="seekOsd" hidden><b></b><span></span></div>
+
+      <!-- 首次进入的操作提示 -->
+      <div id="hint"><span class="chev"></span>右上角「列表 / 设置」进入对应页面 · 单击暂停 · 横滑快进/回退 · 左半屏上下滑调亮度 · 右半屏调音量 · ◀▶ 倒放</div>
+    </section>
+
+    <!-- ============ 第 2 页：设置（独立全屏页，纵向可滚动） ============ -->
+    <section class="page page-set" id="pageSet">
+      <div class="sheet" id="sheet">
+        <div class="set-row">
+          <span class="lab">播放内容</span>
+          <div class="seg" id="modeSeg">
+            <button data-mode="hl" class="on">集锦连播</button>
+            <button data-mode="full">原片</button>
+          </div>
+        </div>
+
+        <div class="set-row">
+          <span class="lab">画面填充</span>
+          <div class="seg" id="fitSeg">
+            <button data-fit="contain" class="on">完整</button>
+            <button data-fit="cover">铺满</button>
+          </div>
+        </div>
+        <div class="set-row">
+          <span class="lab">默认画面</span>
+          <button class="chip" id="resetViewBtn" type="button">恢复完整显示 + 全部集锦</button>
+        </div>
+        <div class="set-row">
+          <span class="lab">集锦浮窗</span>
+          <button class="sw" id="segFloatSw" role="switch"></button>
+        </div>
+
+        <!-- 集锦分类：目前按备注里的「字符」字面筛选；后续提供字符含义表后替换匹配规则 -->
+        <div class="set-row">
+          <span class="lab">集锦分类</span>
+          <input id="catInput" class="cat-input" type="text" placeholder="输入字符，留空=全部" spellcheck="false" autocomplete="off">
+          <button class="chip" id="catApply" type="button">筛选</button>
+        </div>
+        <div class="cat-panel">
+          <div class="cat-tokens" id="catTokens"></div>
+          <div class="cat-count" id="catCount">尚未载入比赛</div>
+        </div>
+
+        <!-- 时间戳前后补时：应对置顶评论时间不准、片段漏内容 -->
+        <div class="set-row">
+          <span class="lab">前置补时</span>
+          <div class="stepper" id="padFrontStep">
+            <button class="stp" type="button" data-step="-0.5" aria-label="减少前置补时">−</button>
+            <span class="stp-val" id="padFrontVal">1.0s</span>
+            <button class="stp" type="button" data-step="0.5" aria-label="增加前置补时">+</button>
+          </div>
+          <span class="step-unit">秒</span>
+        </div>
+        <div class="set-row">
+          <span class="lab">后置补时</span>
+          <div class="stepper" id="padBackStep">
+            <button class="stp" type="button" data-step="-0.5" aria-label="减少后置补时">−</button>
+            <span class="stp-val" id="padBackVal">2.0s</span>
+            <button class="stp" type="button" data-step="0.5" aria-label="增加后置补时">+</button>
+          </div>
+          <span class="step-unit">秒</span>
+        </div>
+
+        <div class="set-row">
+          <span class="lab">自动跟焦</span>
+          <button class="sw" id="autoSw" role="switch"></button>
+        </div>
+        <div class="set-row">
+          <span class="lab">缩放倍率</span>
+          <div class="chips" id="zoomChips">
+            <button class="chip" data-zoom="1">1.00×</button>
+            <button class="chip" data-zoom="1.15">1.15×</button>
+            <button class="chip" data-zoom="1.25">1.25×</button>
+            <button class="chip" data-zoom="1.4">1.40×</button>
+            <button class="chip" data-zoom="1.6">1.60×</button>
+            <button class="chip" data-zoom="2">2.00×</button>
+          </div>
+        </div>
+        <div class="set-row">
+          <span class="lab">竖屏分屏</span>
+          <button class="sw" id="splitSw" role="switch"></button>
+        </div>
+        <div class="set-row">
+          <span class="lab">焦点框</span>
+          <button class="sw" id="focusSw" role="switch"></button>
+        </div>
+        <div class="set-row">
+          <span class="lab">算法可视化</span>
+          <button class="sw" id="algoSw" role="switch"></button>
+        </div>
+        <!-- 视频缓存：本地磁盘缓存 B 站视频/音频字节，关掉 App 再打开同一场直接命中 -->
+        <div class="set-row">
+          <span class="lab">缓存上限</span>
+          <div class="chips" id="cacheChips">
+            <button class="chip" data-mb="200" type="button">200M</button>
+            <button class="chip" data-mb="600" type="button">600M</button>
+            <button class="chip" data-mb="1024" type="button">1G</button>
+            <button class="chip" data-mb="2048" type="button">2G</button>
+          </div>
+        </div>
+        <div class="set-row">
+          <span class="lab">缓存占用</span>
+          <span class="cache-stat" id="cacheStat">读取中…</span>
+          <button class="chip" id="cacheClear" type="button">清空</button>
+        </div>
+        <div class="set-row">
+          <span class="lab">登录 Cookie</span>
+          <input id="cookieInput" class="ck-input" type="text" placeholder="SESSDATA=…（可选）" spellcheck="false">
+          <button class="chip" id="cookieSave" type="button">保存</button>
+        </div>
+        <div class="set-row">
+          <span class="lab">软件更新</span>
+          <span class="val upd-ver" id="curVer">—</span>
+          <button class="chip" id="btnCheckUpdate" type="button">检查更新</button>
+        </div>
+        <div class="upd-box" id="updBox">
+          <div class="upd-status" id="updateStatus">从 GitHub Releases 检查并下载新版本</div>
+          <div class="upd-notes" id="updateNotes" hidden></div>
+          <progress class="upd-prog" id="updateProgress" max="100" value="0" hidden></progress>
+          <div class="upd-actions" id="updateActions" hidden>
+            <button class="chip on" id="btnDoUpdate" type="button">下载并安装</button>
+          </div>
+        </div>
+        <p class="set-hint">集锦分类：目前按置顶评论备注里的字符字面筛选，输入任意字符（如 g、pnn、!、进球）即只播备注包含该字符的片段；留空为全部，多个字符用空格分隔表示「任一命中」，区分大小写（M 与 m 是不同字符）。下面的候选字符从本场评论里自动统计，点一下即可套用。后续拿到「字符含义表」再替换为按语义分类。前置/后置补时：时间戳前后各多播几秒，评论时间不准、动作被切头切尾时调大；改动后自动重建片段序列。自动跟焦：开=算法识别球/人/门并平滑追随构图；关=固定按「缩放倍率」显示，镜头不动。双指捏合缩放属于自定义缩放，会自动关闭跟踪并保持你设定的倍率与画面中心，双指拖动可平移；想恢复跟踪请打开「自动跟焦」或点画面上的放大镜图标。「算法可视化」把识别出的球/人/门/持球者/组合框/预测轨迹画在画面上（仅自动跟焦时有效）。竖屏分屏：上半为源视频原始尺寸，下半为放大镜。B 站对游客请求有风控（-352），加载失败时可填登录 Cookie（浏览器登录 B 站后复制 SESSDATA）提高稳定性。画面填充：源视频是超宽画幅（约 2.4:1），「完整」按比例显示全部画面、上下留黑边；「铺满」会拉伸填满屏幕但裁掉两侧（旧版默认）。倍率大于 1 或开启自动跟焦时会主动放大取景，同样会裁切；把「缩放倍率」设为 1.00× 并关掉「自动跟焦」即可完全不裁切。集锦浮窗：靠左半透明列出本场全部片段，点行跳到该段；单段循环入口在左下角播放控件的「锁」（锁定当前段，播完自动回到段首，双 deck 硬切无黑帧），再点「解」或点其他行即恢复正常连播；左上角 ‹ 可把浮窗收成小把手；浮窗高度随屏幕自适应，会列出本场全部片段，显示不下时在浮窗内上下滑动。默认「画面填充=完整」「倍率 1.00×」「自动跟焦关」＝完整显示全部画面且不放大裁切，全部集锦都播（旧版设置升级后自动回落到这组值）。比赛列表只加载第一页，需要更多请点列表底部的「加载更多」；播放页右上角「列表 / 设置」两个浮动按钮进入对应页面，左右滑动不再切页。折叠屏等超高像素大屏会自动进入「单路解码」模式（备用片段预载但不提前播放），避免音频继续而画面冻住。视频缓存：播放过的视频/音频字节会存在本机，关掉 App 再打开同一场比赛直接从磁盘读，不再重复下载（这些比赛视频不会再变）；缓存按比赛+清晰度+视频/音频分别存，超出上限时自动淘汰最久没用过的块。实测一场 1 小时左右的比赛视频+音频合计约 217 MB，默认 200 MB 足够缓存集锦连播实际用到的那些片段字节，并可同时留住好几场；若想把整场比赛完整离线保存，建议调到 500 MB 或 1G。点「清空」立刻释放空间，不影响已缓存以外的任何数据。</p>
+        <div class="sheet-foot">
+          <button class="set-back" id="setBack" type="button">▶ 回到播放</button>
+          <span>播放页右上角「列表 / 设置」可进入本页<br>VCNC 足球沉浸场</span>
+        </div>
+      </div>
+    </section>
+
   </div>
 
-  <!-- 滑动调节 OSD（亮度/音量） -->
-  <div id="swipeOsd" hidden>
-    <div class="osd-track"><div class="osd-fill"></div></div>
-    <div class="osd-val"></div>
+  <!-- 播放页右上角两个浮动半透明入口（不做顶部 tab，省空间） -->
+  <div class="page-nav" id="pageNav">
+    <button class="ptab" data-page="0" type="button">列表</button>
+    <button class="ptab on" data-page="1" type="button">播放</button>
+    <button class="ptab" data-page="2" type="button">设置</button>
   </div>
 
-  <!-- 首次进入的操作提示 -->
-  <div id="hint"><span class="chev"></span>单击暂停/播放 · 左半屏上下滑调亮度 · 右半屏调音量</div>
-
-  <!-- 轻提示 -->
+  <!-- 轻提示：三页共用 -->
   <div id="toast"></div>
-
-  <!-- 设置面板 -->
-  <div class="sheet-mask" id="sheetMask"></div>
-  <div class="sheet" id="sheet">
-    <div class="sheet-head">
-      <span>播放设置</span>
-      <button class="sheet-close" id="sheetClose">✕</button>
-    </div>
-    <div class="set-row">
-      <span class="lab">播放内容</span>
-      <div class="seg" id="modeSeg">
-        <button data-mode="hl" class="on">集锦连播</button>
-        <button data-mode="full">原片</button>
-      </div>
-    </div>
-    <div class="set-row">
-      <span class="lab">集锦分类</span>
-      <select id="catSel" class="cat-sel">
-        <option value="all">全部集锦</option>
-        <option value="g">只看进球</option>
-        <option value="a">只看助攻</option>
-        <option value="m">只看错失</option>
-        <option value="s">只看扑救</option>
-        <option value="dr">只看带球过人</option>
-        <option value="pnn">只看穿裆</option>
-        <option value="h">只看头球</option>
-        <option value="p">只看传球</option>
-        <option value="c">只看丢球</option>
-        <option value="hot">只看精彩（!）</option>
-      </select>
-    </div>
-    <div class="set-row">
-      <span class="lab">焦点缩放</span>
-      <div class="chips" id="zoomChips">
-        <button class="chip" data-zoom="1.15">1.15×</button>
-        <button class="chip" data-zoom="1.25">1.25×</button>
-        <button class="chip" data-zoom="1.4">1.40×</button>
-        <button class="chip" data-zoom="1.6">1.60×</button>
-        <button class="chip" data-zoom="2">2.00×</button>
-      </div>
-    </div>
-    <div class="set-row">
-      <span class="lab">竖屏分屏</span>
-      <button class="sw" id="splitSw" role="switch"></button>
-    </div>
-    <div class="set-row">
-      <span class="lab">焦点框</span>
-      <button class="sw" id="focusSw" role="switch"></button>
-    </div>
-    <div class="set-row">
-      <span class="lab">算法可视化</span>
-      <button class="sw" id="algoSw" role="switch"></button>
-    </div>
-    <div class="set-row">
-      <span class="lab">登录 Cookie</span>
-      <input id="cookieInput" class="ck-input" type="text" placeholder="SESSDATA=…（可选）" spellcheck="false">
-      <button class="chip" id="cookieSave" type="button">保存</button>
-    </div>
-    <div class="set-row">
-      <span class="lab">软件更新</span>
-      <span class="val upd-ver" id="curVer">—</span>
-      <button class="chip" id="btnCheckUpdate" type="button">检查更新</button>
-    </div>
-    <div class="upd-box" id="updBox">
-      <div class="upd-status" id="updateStatus">从 GitHub Releases 检查并下载新版本</div>
-      <div class="upd-notes" id="updateNotes" hidden></div>
-      <progress class="upd-prog" id="updateProgress" max="100" value="0" hidden></progress>
-      <div class="upd-actions" id="updateActions" hidden>
-        <button class="chip on" id="btnDoUpdate" type="button">下载并安装</button>
-      </div>
-    </div>
-    <p class="set-hint">竖屏分屏：上半为源视频原始尺寸（完整画面不裁切），下半为跟焦放大镜。跟焦算法分多级子算法：球场分割 → 球门识别 → 人员识别 → 足球识别（帧差+密度惩罚+亮度+球场/脚边加成）→ 持球者与球→门行为预测 → 组合构图（球+持球者，射门时提前把球门也装入画面，持续对准组合中心；装得下就放大盯局部，要缩小才装得下就减到不缩放）。起播前会预读一段时间先算好焦点轨迹，识别好了上下一起播放；缩放与移动均为平滑缓动。双指捏合缩放、双指拖动可临时移焦点，松手 1 秒恢复自动跟踪。「算法可视化」把识别出的球/人/门/持球者/组合框/预测轨迹直接画在画面上。集锦分类按置顶评论的动作码筛选（g 进球 / a 助攻 / m 错失 / s 扑救 / dr 带球 / pnn 穿裆 / h 头球 / p 传球 / c 丢球 / ! 精彩）。B 站对游客请求有风控（-352），加载失败时可填登录 Cookie（浏览器登录 B 站后复制 SESSDATA）提高稳定性。</p>
-  </div>
-
-  <!-- 视频列表（只含 VCNC 集锦系列，点选切换） -->
-  <div class="vlist-mask" id="vlistMask"></div>
-  <div class="vlist" id="vlist">
-    <div class="vlist-head">
-      <span>选择比赛</span>
-      <button class="sheet-close" id="vlistClose">✕</button>
-    </div>
-    <div class="vlist-body" id="vlistBody"></div>
-    <div class="vlist-foot" id="vlistFoot" hidden><span class="vlist-more">加载更多…</span></div>
-  </div>
 
   <!-- 分享兜底：系统没透传 B 站链接时（外屏分享等场景） -->
   <div class="fallback" id="fallback" hidden>

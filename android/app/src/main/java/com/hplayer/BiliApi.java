@@ -299,6 +299,17 @@ return out;
         List<String> v = new ArrayList<>();
         List<String> a = new ArrayList<>();
         long ts = System.currentTimeMillis();
+        // 磁盘缓存用的稳定标识：token 每次 resolve 都会变，不能拿它当缓存 key
+        String bvid = "";
+        int page = 1;
+        int qn = 80;
+    }
+
+    /** 与 token 解耦的媒体缓存 key；解析失败返回 null（调用方退化为不缓存的纯代理） */
+    static String mediaCacheKey(String token, String kind) {
+        MediaEntry me = MEDIA.get(token);
+        if (me == null || me.bvid == null || me.bvid.isEmpty()) return null;
+        return me.bvid + "|" + me.page + "|" + me.qn + "|" + ("a".equals(kind) ? "a" : "v");
     }
 
     /** 媒体拉流结果 */
@@ -795,6 +806,9 @@ q.put("high_quality", "1");
         MediaEntry me = new MediaEntry();
         me.v = urlsOf(vs);
         me.a = (as != null) ? urlsOf(as) : new ArrayList<>();
+        me.bvid = v.optString("bvid");
+        me.page = page;
+        me.qn = qn;
         MEDIA.put(token, me);
         long now = System.currentTimeMillis();
         for (Iterator<Map.Entry<String, MediaEntry>> it = MEDIA.entrySet().iterator(); it.hasNext(); ) {

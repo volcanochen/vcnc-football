@@ -24,6 +24,8 @@ Thumbs.db
 # ---- 运行时临时文件 ----
 _comments_raw.json
 *.log
+# 桌面版视频磁盘缓存（含几百 MB 视频字节，绝不入库）
+_cache/
 
 # ---- 测试产物 ----
 _test/out/
@@ -33,3 +35,6 @@ _test/last_result.json
 _test/out/
 _test/__pycache__/
 __pycache__/
+
+# 真机调试截图（临时产物）
+_test/*.png

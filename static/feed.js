@@ -1012,15 +1012,16 @@ ClipPlayer.prototype.showDeck = function (k, hard) {
     if (on) {
       if (hard) {
         d.el.style.transition = 'none';
-        d.el.style.opacity = '1';
         d.el.classList.add('on');
         void d.el.offsetWidth;
         d.el.style.transition = '';
+        d.el.style.opacity = '';   // 归还控制权给 .deck/.deck.on 类规则（内联 1 会永久压住备用态的 opacity:0 → 幽灵画面盖在活动 deck 上）
       } else {
         d.el.classList.add('on');
       }
     } else {
       d.el.classList.remove('on');
+      d.el.style.opacity = '';     // 清掉历史版本残留的内联 opacity
     }
     d.v.muted = true;
     d.a.muted = !on || !this.hasAudio;

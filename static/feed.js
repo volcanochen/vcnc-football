@@ -907,6 +907,17 @@ ClipPlayer.prototype.prepare = async function (d, i, lead) {
   if (this.hasAudio) await seekTo(d.a, t);
   await waitBuffered(d.v, Math.min(2.4, Math.max(1.0, seg.dur * 0.5)), 15000);
   if (this.hasAudio) await waitBuffered(d.a, 0.8, 12000);
+  // seek 必须真的落在段头：目标区间字节 miss 时回源可能拖过 seekTo 的超时，
+  // 直接起播会从旧位置放（点 A 段却看到 A 段尾 → 段末自动跳 A+1，像是「选不中」；
+  // 去别处播一圈数据回填后又「能选了」——同一根因）
+  if (Math.abs(d.v.currentTime - t) > 0.5) {
+    await waitSeeked(d.v, 12000);            // 先等在飞的 seek 自然落地（回源慢≠失败）
+    if (Math.abs(d.v.currentTime - t) > 0.5) await seekTo(d.v, t, 15000);
+    if (Math.abs(d.v.currentTime - t) > 0.5) {
+      diag('prepare-fail seek stuck at ' + d.v.currentTime.toFixed(2) + ' want ' + t.toFixed(2));
+      return false;                          // 上层已有「睡 500ms 再 prepare 一次」的重试
+    }
+  }
   d.ready = true;
   d.everReady = true;
   return true;
@@ -1115,6 +1126,10 @@ ClipPlayer.prototype.jumpTo = async function (i, opts) {
 
   // ---- 慢路径：真的加载（400ms 后才亮遮罩） ----
   this.busy = true;
+  // 在飞的预热/预读与我们用的是同一个备用 deck：先等它们落定，否则 prepare 的
+  // seek 会和预读的采样 seek 打架，起播位置错乱（点 A 段却播到别段内容）
+  if (this.preparing) { try { await this.preparing; } catch (e) {} this.preparing = null; }
+  if (this.prereading) { try { await this.prereading; } catch (e) {} this.prereading = null; }
   var veilShown = false;
   var veilTimer = setTimeout(function () {
     if (self.busy && !veilShown) {
@@ -2510,8 +2525,10 @@ function camApply() {
       for (var di = 0; di < c.decks.length; di++) c.decks[di].v.style.transform = tf;
     }
     if (ov) ov.style.transform = tf;
-    // 倒放抓帧显示画布与 video 同款 transform，取景缩放视觉与正放一致
-    if (rg.on && rg.cvs) rg.cvs.style.transform = tf;
+    // 倒放抓帧显示画布与 video 同款 transform——仅横屏全屏；分屏时 tf 是放大镜的
+    // 缩放（作用对象尺寸是下半屏），套到上半屏主画面画布上会把它撑满/变形，
+    // 分屏的主画面与正放一致保持 none
+    if (rg.on && rg.cvs) rg.cvs.style.transform = split ? 'none' : tf;
     cam.lx = cam.x; cam.ly = cam.y; cam.lz = s;
   }
   // 焦点框：显示质心在「未缩放画面」中的位置（画在主画面上）
@@ -3699,7 +3716,8 @@ function moveSeek(dxs) {
   if (now - (drag.seekPrevAt || 0) > 120) {
     drag.seekPrevAt = now;
     var cp = activeClip();
-    if (cp && cp.state === 'ready') {
+    // 倒放抓帧中：active deck 是抓帧 deck，预览 seek 会打断抓帧流水线，跳过跟手预览
+    if (cp && cp.state === 'ready' && !rg.on) {
       try { cp.decks[cp.activeDeck].v.currentTime = target; } catch (e) {}
     }
   }
@@ -3720,9 +3738,13 @@ function endSeek() {
   }
   var moved = Math.abs(t1 - t0) >= 0.3;
   if (moved) {
-    var cur = c.decks[c.activeDeck];
-    try { cur.v.currentTime = t1; } catch (e) {}
-    if (c.hasAudio) { try { cur.a.currentTime = t1; } catch (e) {} }
+    if (rg.on) {
+      rg.lastPos = t1;                 // 倒放抓帧中：deck 在抓帧别碰，位置走 rg.lastPos
+    } else {
+      var cur = c.decks[c.activeDeck];
+      try { cur.v.currentTime = t1; } catch (e) {}
+      if (c.hasAudio) { try { cur.a.currentTime = t1; } catch (e) {} }
+    }
   }
   cam.track = c.tracks[c.idx] || null;
   camCut(t1 - seg.start);
@@ -3737,9 +3759,13 @@ function cancelSeek() {
   seekBarHide();
   var c = activeClip();
   if (c && c.state === 'ready' && t1 != null && c.idx >= 0) {
-    var cur = c.decks[c.activeDeck];
-    try { cur.v.currentTime = t1; } catch (e) {}
-    if (c.hasAudio) { try { cur.a.currentTime = t1; } catch (e) {} }
+    if (rg.on) {
+      rg.lastPos = t1;                 // 倒放抓帧中：位置走 rg.lastPos，别碰抓帧 deck
+    } else {
+      var cur = c.decks[c.activeDeck];
+      try { cur.v.currentTime = t1; } catch (e) {}
+      if (c.hasAudio) { try { cur.a.currentTime = t1; } catch (e) {} }
+    }
     cam.track = c.tracks[c.idx] || null;
   }
   restoreAfterSeek(c, wasPlaying);
@@ -3748,7 +3774,8 @@ function cancelSeek() {
 function restoreAfterSeek(c, wasPlaying) {
   if (!wasPlaying || !c || c.state !== 'ready' || c.idx < 0) return;
   if (rev.dir < 0) {
-    rg.lastPos = null;               // 用户已 seek 到新位置（v.currentTime = t1），不用旧显示位
+    if (!rg.on) rg.lastPos = null;     // v2 乒乓：deck 已被 seek 到新位置，不用旧显示位；
+                                       // rg.on 时 endSeek/cancelSeek 已把 t1 写进 rg.lastPos
     c.playing = true;
     c.render();
     rev.last = performance.now();
@@ -3819,25 +3846,31 @@ function revStartLoop() {
 }
 function revStopLoop() { rev.on = false; rgStop(); }
 
-/* ---- 倒放 v3：正放抓帧 + 倒序显示 ----
-   根因（真机实测）：倒放逐帧 seek 是逆着数据流走，目标字节区间一旦磁盘缓存 miss，
-   Chrome 发 Range 回源，seeked 被网络拖住（600ms 超时兜底全中，帧率 1.7fps 幻灯片）；
-   数据回填后同区域 seek 又只要 100~200ms。正放永远顺着数据流，drawImage 回读实测
-   5.4ms/帧。v3 把倒放改成：后台 deck 以 2× 正放抓帧（同时把数据灌进缓存），显示端
-   按内容时间轴倒序消费 ImageBitmap——显示零 seek，帧率均匀，慢动作档天然顺滑。
-   双 deck 交替抓窗（窗 1.6s：2× 速度 0.8s 抓完 < 1.6s 播完，供给过剩）；
-   窗界未就绪时 rg.floor 钳住显示时间轴停帧等待；段首回绕重抓段尾窗。
-   不支持（无 createImageBitmap / 大屏单路解码 LOW_DECK_MODE）或运行失败 →
+/* ---- 倒放 v4：整段抓帧缓存 + 倒序显示 ----
+   v3 窗口流水线仍有窗界 seek 停顿（生产周期贴着消费率）。集锦段只有 ~10s，
+   干脆整段缓存：起倒放时后台 deck 以 2.5× 正放把整段抓成 JPEG 帧（canvas.toBlob
+   异步编码，~60KB/帧，10s 段约 120 帧 ≈ 8MB），抓完才开始倒序播放——显示零 seek、
+   零窗界停顿，段内回绕直接复用缓存瞬时重来（不重抓）。抓帧期间画布画
+   「倒放准备中 N%」。同一段再次倒放（暂停恢复/拖动 seek/换向回来）缓存命中瞬时起播。
+   不支持（无 createImageBitmap/toBlob、大屏单路解码 LOW_DECK_MODE）或运行失败 →
    rg.disabled 本次会话退回 v2 乒乓。 */
-var RG_WIN = 2.8;          // 抓帧窗长（秒）：越长窗界衔接次数越少，内存按 ~13帧/s × 窗长 算
-var RG_RATE = 2.5;         // 抓帧播放倍速：生产率须稳超 1× 消费（seek+抓 1.1s 生产 2.8s 内容）
-var RG_GRABMIN = 0.08;     // 收帧最小内容间隔（秒）：currentTime 高倍速下更新过密，限频省内存
-var RG_MAXBUF = 60;        // 位图队列上限（~60 × 1.2MB ≈ 72MB 封顶，防内存膨胀）
+var RG_RATE = 1.8;         // 抓帧播放倍速：必须低于编码吞吐（0.08s 内容 / 36ms 编码 ≈ 2.2 内容-s/s），否则 currentTime 跳帧漏抓
+var RG_GRABMIN = 0.08;     // 抓帧最小内容间隔（秒）：currentTime 更新过密，限频省内存
 var RG_EPS = 0.03;
 var rg = {
-  on: false, disabled: false, buf: [], cur: null, curTs: 0, pos: 0, floor: 0,
-  last: 0, raf: 0, nextWin: 0, wi: null, cvs: null, ctx: null, gcvs: null, gctx: null,
-  hudT: 0, layW: 0, layH: 0, c: null, idx0: -1, lastPos: null
+  on: false, disabled: false,
+  cache: [],               // 升序 {ts, url}：整段帧缓存（JPEG dataURL，~9MB/段）
+  complete: false,         // 缓存已覆盖整段
+  segKey: -1, segRef0: null, segTok: '',   // 缓存归属（段下标/段对象/场次），换段即失效
+  deck: null,              // 抓帧 deck（任意时刻只允许一个在 seek，双 deck 并行 seek 互卡）
+  lastT: -1, lastGrab: -1, grabStartAt: 0, lastPushAt: 0,
+  pos: 0, cPtr: -1,        // 显示位置 / 当前帧下标（cache 内）
+  disp: null,              // {ts, bm}：已解码并画上的帧
+  dec: null,               // {ts, bm, p}：解码中/已解码帧（先行解码，换帧零等待）
+  cvs: null, ctx: null, gcvs: null, gctx: null,
+  hudT: 0, layW: 0, layH: 0,
+  c: null, idx0: -1, segRef: null, lastPos: null,
+  last: 0, raf: 0
 };
 
 function rgCan() {
@@ -3860,6 +3893,7 @@ function rgStart(c, fromT) {
   rgStop();
   rg.c = c; rg.idx0 = c.idx;
   var seg = c.segs[c.idx];
+  rg.segRef = seg;
   rg.cvs = $('.grabcv', c.el);
   if (!rg.cvs) {                       // 旧缓存 DOM 兜底：动态补一个
     rg.cvs = document.createElement('canvas');
@@ -3873,12 +3907,16 @@ function rgStart(c, fromT) {
     rg.gctx = rg.gcvs.getContext('2d');
   }
   rgLayout();
-  var end = seg.start + seg.dur;
-  if (fromT == null || fromT > end - 0.1 || fromT < seg.start + 0.2) fromT = end - 0.1;
+  var head = seg.start + 0.12, end = seg.start + seg.dur - 0.02;
+  if (fromT == null || fromT > end || fromT < head + 0.05) fromT = end;
   rg.pos = fromT;
-  rg.floor = fromT;
-  rg.nextWin = fromT;
-  rg.buf = []; rg.cur = null; rg.curTs = 0; rg.wi = null;
+  rg.lastPos = fromT;
+  rg.cPtr = -1; rg.disp = null; rg.dec = null;
+  // 缓存命中判定：同场次 + 同段下标 + 同一段对象（buildSegs 重建后段对象换代即失效）
+  if (!(rg.cache.length && rg.segKey === c.idx && rg.segRef0 === seg && rg.segTok === c.token)) {
+    rg.cache = []; rg.complete = false;
+    rg.segKey = c.idx; rg.segRef0 = seg; rg.segTok = c.token;
+  }
   rg.last = performance.now();
   rg.on = true;
   document.body.classList.add('rev-grab');
@@ -3888,14 +3926,16 @@ function rgStart(c, fromT) {
     try { d.v.pause(); } catch (e) {}
     if (c.hasAudio) { try { d.a.pause(); } catch (e) {} }
   }
-  rgGrabNext();                          // 串行抓窗：双 deck 同时 seek 会在 WebView 媒体流水线上互卡
-  rgPrefetchSeg(c, seg);
+  if (!rg.complete) {
+    rgGrabKick();
+    rgPrefetchSeg(c, seg);
+  }
+  cam.lz = -1; camApply();             // 强制把 transform 同步到新画布（取景缩放不丢）
   rg.raf = requestAnimationFrame(rgShow);
 }
 
-/** 倒放窗回溯方向的数据 miss 会让 seek 回源拖到秒级（8s 超时都等不完）。
- *  对当前段按 ±3MB 余量单独预热：服务端回源拉全段字节，之后窗 seek 全部命中磁盘缓存。
- *  （集锦预取的线性映射 512KB 余量在高码率区不够，倒放是逆数据流走，miss 概率放大） */
+/** 倒放方向的数据 miss 会让 seek 回源拖到秒级。对当前段按 ±3MB 余量单独预热：
+ *  服务端回源拉全段字节，之后抓帧 seek 全部命中磁盘缓存。 */
 function rgPrefetchSeg(c, seg) {
   if (!c.token || !c.videoDuration) return;
   probeTotalBytes(c.token, 'v').then(function (total) {
@@ -3910,44 +3950,41 @@ function rgPrefetchSeg(c, seg) {
   });
 }
 
-/** 停止并回收。保留 rg.lastPos（暂停恢复用），其余状态清零；幂等 */
+/** 停止并回收。缓存保留（仅 ~8MB，同段再进倒放瞬时起播）；rg.lastPos 保留供
+ *  回正放时把 deck 拉回显示位置；幂等 */
 function rgStop() {
   var wasOn = rg.on;
   rg.on = false;
   if (rg.raf) { cancelAnimationFrame(rg.raf); rg.raf = 0; }
-  if (rg.wi) {
-    try { rg.wi.d.v.pause(); } catch (e) {}
-    rg.wi.d.rgBusy = false;
-    rg.wi = null;
+  if (rg.deck) {
+    try { rg.deck.v.pause(); } catch (e) {}
+    rg.deck.rgBusy = false;
+    rg.deck = null;
   }
-  for (var i = 0; i < rg.buf.length; i++) { try { rg.buf[i].bm.close(); } catch (e) {} }
-  rg.buf = [];
-  if (rg.cur) { try { rg.cur.close(); } catch (e) {} rg.cur = null; }
+  if (rg.disp) { try { rg.disp.bm.close(); } catch (e) {} rg.disp = null; }
+  if (rg.dec && rg.dec.bm) { try { rg.dec.bm.close(); } catch (e) {} }
+  rg.dec = null;
   document.body.classList.remove('rev-grab');
   if (rg.cvs) rg.cvs.style.transform = 'none';
-  rg.c = null; rg.idx0 = -1;
+  rg.c = null; rg.idx0 = -1; rg.segRef = null;
+  rg.cPtr = -1;
   return wasOn;
 }
 
-/** 派发一个抓帧窗给空闲 deck：seek 到窗头 → 2× 正放，rgShow 里收帧。
- *  串行单窗：任意时刻只允许一个 deck 在 seek（实测双 deck 并行 seek 会让
- *  WebView 媒体流水线互卡，seek 12s 不完成）；窗完成自动接力下一窗。
- *  供给率：窗 2.4s 内容，seek 0.2~1s + 2× 速度抓 1.2s ≈ 1.4~2.2s 生产 < 2.4s 消费。 */
-function rgGrabNext() {
-  var c = rg.c;
-  if (!rg.on || !c || rg.wi) return;
-  var seg = c.segs[c.idx];
-  if (!seg) return;
-  var we = rg.nextWin;
-  var ws = we - RG_WIN;
-  if (ws < seg.start + 0.12) ws = seg.start + 0.12;
-  if (we - ws < 0.15) return;          // 段内已覆盖完，等回绕
+/** 派发抓帧：空闲 deck 同源化 → seek 到抓取起点 → RG_RATE 正放。
+ *  串行单 deck：任意时刻只允许一个 deck 在 seek（实测双 deck 并行 seek
+ *  会让 WebView 媒体流水线互卡）。 */
+function rgGrabKick() {
+  var c = rg.c, seg = rg.segRef;
+  if (!rg.on || rg.complete || !c || rg.deck || !seg) return;
   var d = null;
   for (var i = 0; i < c.decks.length; i++) {
     if (!c.decks[i].rgBusy) { d = c.decks[i]; break; }
   }
   if (!d) return;
   d.rgBusy = true;
+  rg.deck = d;
+  rg.grabStartAt = rg.lastPushAt = performance.now();
   // deck 源就绪：备用 deck 可能从未加载过（readyState 0，seekTo 会立即 false），先同源化
   var url = '/api/media/' + c.token + '/v?i=0';
   if (!(d.seg === c.idx && d.v.dataset.src === url && d.everReady)) {
@@ -3955,16 +3992,15 @@ function rgGrabNext() {
     d.seg = c.idx;
     d.everReady = true;
   }
-  var wi = { d: d, ws: ws, we: we, last: -1, t0: performance.now(), retry: 0 };
-  rg.wi = wi;
-  rg.nextWin = ws;                     // 窗向前滚动
+  // 断点续抓：从缓存已有的最高时间戳之后继续；空缓存从段头抓
+  var from = rg.cache.length ? rg.cache[rg.cache.length - 1].ts + RG_GRABMIN : seg.start + 0.12;
   rgWaitMeta(d.v, 10000).then(function (metaOk) {
-    if (!rg.on || rg.wi !== wi) return;
+    if (!rg.on || rg.deck !== d) return;
     if (!metaOk) { rgFail('deck metadata timeout'); return; }
-    return rgSeekWait(d.v, ws, 40000).then(function (ok) {
-      if (!rg.on || rg.wi !== wi) return;
-      if (!ok) { rgFail('seek window fail'); return; }
-      wi.t0 = performance.now();
+    return rgSeekWait(d.v, from, 40000).then(function (ok) {
+      if (!rg.on || rg.deck !== d) return;
+      if (!ok) { rgFail('seek grab start fail'); return; }
+      rg.lastT = -1; rg.lastGrab = -1;
       try { d.v.playbackRate = RG_RATE; } catch (e) {}
       d.v.muted = true;
       safePlay(d.v);
@@ -3983,7 +4019,7 @@ function rgWaitMeta(v, timeout) {
   });
 }
 
-/** 倒放窗 seek：只发一次 currentTime，轮询等待到位（seekTo 的超时重试会取消
+/** 抓帧 seek：只发一次 currentTime，轮询等待到位（seekTo 的超时重试会取消
  *  进行中的 seek 造成从头回源死循环；慢 seek 的正确姿势是等它自然完成） */
 function rgSeekWait(v, t, timeout) {
   return new Promise(function (res) {
@@ -4011,104 +4047,148 @@ function rgFail(msg) {
   if (c && rev.dir < 0 && c.playing) revStartLoop();
 }
 
-function rgPush(ts, bm) {
-  var b = rg.buf;
-  if (b.length && b[b.length - 1].ts >= ts - RG_EPS) { try { bm.close(); } catch (e) {} return; }
-  b.push({ ts: ts, bm: bm });
-  if (ts < rg.floor) rg.floor = ts;
-  if (b.length > RG_MAXBUF) {
-    var old = b.shift();
-    try { old.bm.close(); } catch (e) {}
-  }
+/** 抓一帧：drawImage → toDataURL 同步 JPEG 编码（~36ms/帧，62KB），按 ts 有序插入缓存。
+ *  注意：本 WebView（Chrome 74）的 canvas.toBlob 静默丢全部回调（实测 0/35），必须用 toDataURL。 */
+function rgCapture(v, t) {
+  try { rg.gctx.drawImage(v, 0, 0, 854, 356); } catch (e) { return; }
+  rg.lastPushAt = performance.now();
+  var url;
+  try { url = rg.gcvs.toDataURL('image/jpeg', 0.8); } catch (e) { return; }
+  if (!url || url.length < 1000) return;
+  var arr = rg.cache, lo = 0, hi = arr.length;
+  while (lo < hi) { var mid = (lo + hi) >> 1; if (arr[mid].ts < t) lo = mid + 1; else hi = mid; }
+  if (lo < arr.length && arr[lo].ts < t + RG_EPS) return;   // 重复帧
+  arr.splice(lo, 0, { ts: t, url: url });
 }
 
-/** 段首回绕：清队列与在抓的窗，从段尾重抓 */
-function rgRewind(seg) {
-  var c = rg.c;
-  for (var i = 0; i < rg.buf.length; i++) { try { rg.buf[i].bm.close(); } catch (e) {} }
-  rg.buf = [];
-  rg.pos = seg.start + seg.dur - 0.1;
-  rg.floor = rg.pos;
-  rg.nextWin = rg.pos;
-  if (rg.wi) {
-    try { rg.wi.d.v.pause(); } catch (e) {}
-    rg.wi.d.rgBusy = false;
-    rg.wi = null;
-  }
-  for (var j = 0; j < c.decks.length; j++) c.decks[j].rgBusy = false;
-  rgGrabNext();
-  rgGrabNext();
+/** 抓帧期间的画面：黑底 + 准备进度 */
+function rgPreroll(frac) {
+  var cv = rg.cvs, ctx = rg.ctx;
+  if (!cv || !ctx) return;
+  rgLayout();
+  var w = cv.width, h = cv.height;
+  if (!w || !h) return;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(255,255,255,.85)';
+  ctx.textAlign = 'center';
+  ctx.font = '600 ' + Math.max(14, Math.round(h / 26)) + 'px sans-serif';
+  ctx.fillText('倒放准备中 ' + Math.round(frac * 100) + '%', w / 2, h / 2);
+  var bw = Math.min(w * 0.42, 320), bx = (w - bw) / 2, by = h / 2 + Math.max(12, h / 16);
+  ctx.fillStyle = 'rgba(255,255,255,.22)';
+  ctx.fillRect(bx, by, bw, 3);
+  ctx.fillStyle = '#00aeec';
+  ctx.fillRect(bx, by, bw * frac, 3);
 }
 
-/** 显示主循环（rAF）：推进 pos → 收帧 → 消费位图 → 派窗 → 看门狗 */
+/** 解码一帧 dataURL → ImageBitmap；完成写入 rg.dec（ts 校验防过期写回） */
+function rgDecode(item) {
+  var ts = item.ts;
+  var p = new Promise(function (res, rej) {
+    var b64 = item.url.split(',')[1], bin = atob(b64), u8 = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    res(new Blob([u8], { type: 'image/jpeg' }));
+  }).then(function (b) { return createImageBitmap(b); }).then(function (bm) {
+    if (rg.dec && rg.dec.ts === ts) rg.dec.bm = bm;
+    else { try { bm.close(); } catch (e) {} }
+  })['catch'](function () {
+    if (rg.dec && rg.dec.ts === ts) rg.dec.fail = true;
+  });
+  rg.dec = { ts: ts, bm: null, p: p };
+}
+
+/** 显示主循环（rAF）：抓帧 →（抓完）推进 pos → 换帧 → HUD */
 function rgShow() {
   if (!rg.on) return;
   rg.raf = requestAnimationFrame(rgShow);
   var c = rg.c;
-  if (!c || c.state !== 'ready' || c.idx < 0 || c.idx !== rg.idx0) { revStopLoop(); return; }
-  var seg = c.segs[c.idx];
-  if (!seg) { revStopLoop(); return; }
+  if (!c || c.state !== 'ready' || c.idx < 0 || c.idx !== rg.idx0 || c.segs[c.idx] !== rg.segRef) { revStopLoop(); return; }
+  var seg = rg.segRef;
   var now = performance.now();
-  var dt = Math.min(0.25, (now - rg.last) / 1000);
-  rg.last = now;
+  var segEnd = seg.start + seg.dur;
+  var head = seg.start + 0.12, endT = segEnd - 0.02;
 
-  /* -- 收帧：抓帧 deck 正放中，currentTime 变化即抓 -- */
-  var wi = rg.wi;
-  if (wi) {
-    var wv = wi.d.v;
-    if (now - wi.t0 > 40000) { rgFail('window watchdog'); return; }
+  /* -- 抓帧：deck 正放中，currentTime 变化即抓 -- */
+  var d = rg.deck;
+  if (d) {
+    var wv = d.v;
+    if (now - Math.max(rg.grabStartAt, rg.lastPushAt) > 45000) { rgFail('grab watchdog'); return; }
     if (wv.readyState >= 2 && !wv.seeking) {
       var t = wv.currentTime;
-      if (t !== wi.last) {
-        var skip = wi.lastGrab != null && t - wi.lastGrab < RG_GRABMIN;
-        wi.last = t;
-        if (!skip && t >= wi.ws - RG_EPS && t <= wi.we + 0.25) {
-          wi.lastGrab = t;
-          try { rg.gctx.drawImage(wv, 0, 0, 854, 356); } catch (e) {}
-          var ts0 = t;
-          (function (ts) {
-            createImageBitmap(rg.gcvs).then(function (bm) {
-              if (rg.on) rgPush(ts, bm); else { try { bm.close(); } catch (e) {} }
-            })['catch'](function () { rgFail('bitmap reject'); });
-          })(ts0);
-        }
-        if (t >= wi.we - RG_EPS || wv.ended) {
+      if (t !== rg.lastT) {
+        rg.lastT = t;
+        if (t >= endT || wv.ended) {
+          rgCapture(wv, Math.min(t, endT));
           try { wv.pause(); } catch (e) {}
-          wi.d.rgBusy = false;
-          rg.wi = null;
-          rgGrabNext();
+          d.rgBusy = false;
+          rg.deck = null;
+          rg.complete = true;
+          diag('rg cache done n=' + rg.cache.length + ' t=' + t.toFixed(2) + ' endT=' + endT.toFixed(2) + ' ended=' + wv.ended);
+        } else if (rg.lastGrab < 0 || t - rg.lastGrab >= RG_GRABMIN) {
+          if (rg.lastGrab < 0) diag('rg grab first t=' + t.toFixed(2) + ' want>=' + (seg.start + 0.12).toFixed(2));
+          rg.lastGrab = t;
+          rgCapture(wv, t);
         }
       }
     }
+  } else if (!rg.complete) {
+    rgGrabKick();
   }
 
-  /* -- 推进显示时间轴 -- */
+  /* -- 未抓完：画准备进度，抓完再开始倒序显示 -- */
+  if (!rg.complete) {
+    var frac = rg.cache.length
+      ? clamp((rg.cache[rg.cache.length - 1].ts - head) / Math.max(0.1, endT - head), 0, 1)
+      : 0;
+    rg.lastPos = rg.pos;                 // 准备中切回正放：从发起倒放的位置恢复
+    rgPreroll(frac);
+    if (now - rg.hudT > 250) { rg.hudT = now; c.hud(rg.pos, segEnd); }
+    return;
+  }
+
+  /* -- 推进显示时间轴（整段缓存在手，段首回绕瞬时重来） -- */
+  var dt = Math.min(0.25, (now - rg.last) / 1000);
+  rg.last = now;
   if (c.playing) {
     rg.pos -= dt * slowBase();
-    if (rg.pos < rg.floor + 0.02) rg.pos = rg.floor + 0.02;   // 窗界未就绪：钳住停帧
-    if (rg.pos <= seg.start + 0.12) rgRewind(seg);
+    if (rg.pos <= seg.start + 0.12) rg.pos = segEnd - 0.1;    // 段首回绕
   }
   rg.lastPos = rg.pos;
 
-  /* -- 消费：显示 ts ≤ pos 的最大 ts 帧，回收已过帧 -- */
-  var b = rg.buf;
-  while (b.length && b[b.length - 1].ts > rg.pos + RG_EPS && b[b.length - 1].bm !== rg.cur) {
-    var gone = b.pop();
-    try { gone.bm.close(); } catch (e) {}
+  /* -- 定位当前帧：cache 中最大的 ts ≤ pos -- */
+  var arr = rg.cache, n = arr.length;
+  if (!n) return;
+  var i = rg.cPtr;
+  if (i >= n) i = n - 1;
+  if (i < 0 || arr[i].ts > rg.pos + RG_EPS || (i + 1 < n && arr[i + 1].ts <= rg.pos + RG_EPS)) {
+    var lo = 0, hi = n - 1; i = -1;
+    while (lo <= hi) { var m = (lo + hi) >> 1; if (arr[m].ts <= rg.pos + RG_EPS) { i = m; lo = m + 1; } else hi = m - 1; }
   }
-  if (b.length && b[b.length - 1].ts <= rg.pos + RG_EPS) {
-    var top = b.pop();
-    rgDraw(top.bm);
-    var old = rg.cur;
-    rg.cur = top.bm; rg.curTs = top.ts;
-    if (old) { try { old.close(); } catch (e) {} }
+  if (i < 0) i = 0;
+  rg.cPtr = i;
+
+  /* -- 换帧（解码到位才换；解码期间画面保持当前帧不黑屏不跳变） -- */
+  var want = arr[i];
+  if (!rg.disp || rg.disp.ts !== want.ts) {
+    if (rg.dec && rg.dec.ts === want.ts && rg.dec.bm) {
+      var old = rg.disp;
+      rg.disp = { ts: want.ts, bm: rg.dec.bm };
+      rg.dec = null;
+      rgDraw(rg.disp.bm);
+      if (old) { try { old.bm.close(); } catch (e) {} }
+      // 先行解码下一帧（倒放方向是 i-1），下次换帧零等待
+      if (i > 0 && arr[i - 1].ts < want.ts - RG_EPS) rgDecode(arr[i - 1]);
+    } else if (!rg.dec || rg.dec.ts !== want.ts) {
+      if (rg.dec && rg.dec.bm) { try { rg.dec.bm.close(); } catch (e) {} }
+      rgDecode(want);
+    }
+    if (!rg.disp || rg.disp.ts !== want.ts) {
+      rg.pos = Math.max(rg.pos, rg.disp ? rg.disp.ts : want.ts);   // 钳住等解码
+    }
   }
 
   /* -- HUD 节流刷新 -- */
-  if (now - rg.hudT > 250) {
-    rg.hudT = now;
-    c.hud(rg.pos, seg.start + seg.dur);
-  }
+  if (now - rg.hudT > 250) { rg.hudT = now; c.hud(rg.pos, segEnd); }
 }
 
 /** 绘制当前位图（contain 内接 + 黑边，几何与 video object-fit:contain 一致，

@@ -238,6 +238,20 @@ body.split .magview { display: block; }
 body.chrome-off .chrome { opacity: 0; }
 .chrome > * { pointer-events: auto; }
 
+/* ---------- 浮动按钮与进度条同进退（播放键常驻，其余跟随 chrome 显隐） ---------- */
+#cornerCtl > *, #pageNav, #viewReset, #segFloat { transition: opacity .3s ease; }
+body.chrome-off #cornerCtl > :not(#btnPlay) {
+  opacity: 0;
+  pointer-events: none;
+  /* 宽度一并收起：控制条药丸缩到只剩播放键，不留一排空位 */
+  width: 0; min-width: 0;
+  margin: 0; padding: 0;
+  overflow: hidden;
+}
+body.chrome-off #pageNav,
+body.chrome-off #viewReset,
+body.chrome-off #segFloat { opacity: 0; pointer-events: none; }
+
 .ch-top {
   position: absolute;
   top: 0; left: 0; right: 0;

@@ -359,7 +359,7 @@ def t_reverse_direction(s, ctx):
     return ok, json.dumps(r, ensure_ascii=False)
 
 
-@case("rev-grab", "倒放 v3 抓帧引擎：启动走抓帧模式、buf 有帧、pos 倒退、回正放后 deck 位置恢复")
+@case("rev-grab", "倒放 v4 整段缓存：启动走抓帧、整段抓完 complete、pos 倒退、回正放后 deck 位置恢复")
 def t_rev_grab(s, ctx):
     # 启动倒放，等抓帧产出
     r = jev(s, """
@@ -379,16 +379,16 @@ def t_rev_grab(s, ctx):
     r2 = jev(s, """
     (function(){
       var c = activeClip();
-      // 探针：buf 峰值 / 显示帧计数 / rgStop 时记录最后显示位置（都在页面全局，跨 evaluate 保留）
+      // 探针：抓帧计数 / 显示帧计数 / 回正放时的最后显示位置（页面全局，跨 evaluate 保留）
       if (!rg._probeHooked) {
         rg._probeHooked = true;
-        rg._maxBufSeen = 0; rg._drawCount = 0; rg._lastPosAtFwd = null;
-        var od = window.rgDraw, op = window.rgPush, os = window.rgStop;
+        rg._capCount = 0; rg._drawCount = 0; rg._lastPosAtFwd = null;
+        var oc = window.rgCapture, od = window.rgDraw, os = window.rgStop;
+        window.rgCapture = function (v, t) { rg._capCount++; return oc(v, t); };
         window.rgDraw = function (bm) { rg._drawCount++; return od(bm); };
-        window.rgPush = function (ts, bm) { rg._maxBufSeen = Math.max(rg._maxBufSeen, rg.buf.length + 1); return op(ts, bm); };
         window.rgStop = function () { rg._lastPosAtFwd = rg.lastPos; return os(); };
       }
-      rg._maxBufSeen = 0; rg._drawCount = 0; rg._lastPosAtFwd = null;
+      rg._capCount = 0; rg._drawCount = 0; rg._lastPosAtFwd = null;
       if (!c.playing) c.togglePlay();
       setPlayDir(-1);
       return JSON.stringify({ rgOn: rg.on, grabClass: document.body.classList.contains('rev-grab'),
@@ -397,13 +397,28 @@ def t_rev_grab(s, ctx):
     """, timeout_s=30)
     if not r2.get("rgOn"):
         return False, json.dumps(r2, ensure_ascii=False)
-    time.sleep(6)
+    # 自适应等整段抓完（段 8~20s @1.8x → 4~13s），期间跟踪 pos 最小值
+    # （倒放会在段首回绕重播，采样瞬间 pos 可能恰好回绕到段尾，必须用 min 判定）
+    minpos = 9e9
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        time.sleep(2)
+        rr = jev(s, "JSON.stringify({c: rg.complete, on: rg.on, pos: +rg.pos.toFixed(2)})")
+        if rr.get("on") and isinstance(rr.get("pos"), (int, float)):
+            minpos = min(minpos, rr["pos"])
+        if rr.get("c") and rr.get("on") and time.time() > deadline - 24:
+            time.sleep(2)
+            rr2 = jev(s, "JSON.stringify({pos: +rg.pos.toFixed(2)})")
+            if isinstance(rr2.get("pos"), (int, float)):
+                minpos = min(minpos, rr2["pos"])
+            break
     r3 = jev(s, """
     (function(){
       var c = activeClip();
-      var out = { pos: +rg.pos.toFixed(2), bufEverGrew: !!rg._maxBufSeen, disabled: rg.disabled,
+      var out = { pos: +rg.pos.toFixed(2), complete: !!rg.complete, cacheN: rg.cache.length,
+        capCount: rg._capCount | 0, disabled: rg.disabled,
         grabClass: document.body.classList.contains('rev-grab'), drawCount: rg._drawCount | 0 };
-      rg._maxBufSeen = null; rg._drawCount = 0;
+      rg._capCount = 0; rg._drawCount = 0;
       setPlayDir(1);                       // 回正放：deck 应被拉回显示位置
       var cur = c.decks[c.activeDeck];
       out.restored = rg._lastPosAtFwd == null || Math.abs(cur.v.currentTime - rg._lastPosAtFwd) < 1.5;
@@ -411,11 +426,58 @@ def t_rev_grab(s, ctx):
       return JSON.stringify(out);
     })()
     """, timeout_s=30)
-    ok = (r3.get("pos", 9e9) < r2.get("pos0", 0)                    # pos 在倒退
+    ok = (minpos < r2.get("pos0", 0)                                # pos 到过比起点更小的时间（在倒退）
+          and r3.get("complete") is True                            # 整段抓完
+          and (r3.get("cacheN") or 0) >= 20                         # 缓存帧数合理（0.08s 间隔）
           and r3.get("disabled") is not True
           and r3.get("restored") is True
           and r3.get("fwdPlaying") is True)
     return ok, json.dumps({"start": r2, "run": r3}, ensure_ascii=False)
+
+
+@case("chrome-autohide", "chrome 自动隐藏：3 秒无操作后除播放键外的浮动按钮全部淡出，唤回后恢复")
+def t_chrome_autohide(s, ctx):
+    r = jev(s, """
+    (function(){
+      var out = {};
+      showChrome();                        // 点亮并等自动隐藏
+      return JSON.stringify(out);
+    })()
+    """)
+    time.sleep(3.6)                        # chromeTimer 3s + 余量
+    r2 = jev(s, """
+    (function(){
+      var out = {};
+      out.off = document.body.classList.contains('chrome-off');
+      function op(sel){ var e = $(sel); return e ? getComputedStyle(e).opacity : null; }
+      function pe(sel){ var e = $(sel); return e ? getComputedStyle(e).pointerEvents : null; }
+      out.navOp = op('#pageNav'); out.navPe = pe('#pageNav');
+      out.revOp = op('#btnRev');
+      out.playOp = op('#btnPlay'); out.playPe = pe('#btnPlay');
+      out.playW = (function(){ var e = $('#btnPlay'); return e ? e.getBoundingClientRect().width : 0; })();
+      out.sfOp = op('#segFloat');
+      showChrome();
+      return JSON.stringify(out);
+    })()
+    """)
+    time.sleep(0.9)                      # 等 0.3s 淡入过渡走完
+    r3 = jev(s, """
+    (function(){
+      var out = { off: document.body.classList.contains('chrome-off') };
+      out.navOp = getComputedStyle($('#pageNav')).opacity;
+      out.revOp = getComputedStyle($('#btnRev')).opacity;
+      return JSON.stringify(out);
+    })()
+    """)
+    ok = (r2.get("off") is True
+          and r2.get("navOp") == '0' and r2.get("navPe") == 'none'
+          and r2.get("revOp") == '0'
+          and r2.get("playOp") == '1' and r2.get("playPe") != 'none'
+          and (r2.get("playW") or 0) > 30                # 播放键没被收窄
+          and r2.get("sfOp") == '0'
+          and r3.get("off") is False
+          and float(r3.get("navOp") or 0) > 0.9 and float(r3.get("revOp") or 0) > 0.9)
+    return ok, json.dumps({"off": r2, "back": r3}, ensure_ascii=False)
 
 
 @case("pause-resume", "暂停/恢复：恢复后画面继续前进（看门狗覆盖场景）")

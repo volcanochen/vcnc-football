@@ -359,9 +359,9 @@ def t_reverse_direction(s, ctx):
     return ok, json.dumps(r, ensure_ascii=False)
 
 
-@case("rev-grab", "倒放 v4 整段缓存：启动走抓帧、整段抓完 complete、pos 倒退、回正放后 deck 位置恢复")
+@case("rev-grab", "倒放 v5 被动预缓存：正放被动积累帧、点倒放即时起播（无准备等待）、后台补抓 complete、pos 倒退、回正放 deck 位置恢复")
 def t_rev_grab(s, ctx):
-    # 启动倒放，等抓帧产出
+    # 跳到长段并起播，让被动预缓存积累几帧
     r = jev(s, """
     (function(){
       var c = activeClip();
@@ -369,13 +369,15 @@ def t_rev_grab(s, ctx):
       var si = -1;
       for (var i = 0; i < c.segs.length; i++) if (c.segs[i].dur >= 8) { si = i; break; }
       if (si < 0) return JSON.stringify({error: 'no long seg'});
+      goPage(1);                           // 被动预缓存只在播放页跑（page===1）
       c.jumpTo(si);
+      if (!c.playing) c.togglePlay();
       return JSON.stringify({armed: true, canGrab: rgCan()});   // 大屏模拟（zoom 用例的 metrics override）下 rgCan=false 属预期回退
     })()
     """, timeout_s=60)
     if r.get("error") or not r.get("canGrab"):
         return (r.get("canGrab") is False), json.dumps(r, ensure_ascii=False)   # 不支持抓帧的设备视为通过
-    time.sleep(2.5)
+    time.sleep(2.5)   # 正放 2.5s → 被动缓存应积累 ~5 帧（0.5s 间隔）
     r2 = jev(s, """
     (function(){
       var c = activeClip();
@@ -389,29 +391,38 @@ def t_rev_grab(s, ctx):
         window.rgStop = function () { rg._lastPosAtFwd = rg.lastPos; return os(); };
       }
       rg._capCount = 0; rg._drawCount = 0; rg._lastPosAtFwd = null;
+      var pasN = rg.cache.length;          // 点倒放前被动预缓存帧数
       if (!c.playing) c.togglePlay();
       setPlayDir(-1);
       return JSON.stringify({ rgOn: rg.on, grabClass: document.body.classList.contains('rev-grab'),
-        cvs: !!rg.cvs, pos0: +rg.pos.toFixed(2) });
+        cvs: !!rg.cvs, pos0: +rg.pos.toFixed(2), pasN: pasN });
     })()
     """, timeout_s=30)
     if not r2.get("rgOn"):
         return False, json.dumps(r2, ensure_ascii=False)
-    # 自适应等整段抓完（段 8~20s @1.8x → 4~13s），期间跟踪 pos 最小值
-    # （倒放会在段首回绕重播，采样瞬间 pos 可能恰好回绕到段尾，必须用 min 判定）
+    # v5 断言：被动帧在手 → 1.5s 内必须已经画出倒放帧（不再有 6~9s「准备中」）
+    time.sleep(1.5)
+    r22 = jev(s, "JSON.stringify({drawCount: rg._drawCount | 0, dispTs: rg.disp ? +rg.disp.ts.toFixed(2) : null, cacheN: rg.cache.length})")
+    instant = (r22.get("drawCount") or 0) >= 1 and r22.get("dispTs") is not None
+    # 自适应等后台补抓整段细化（complete），同时跟踪 pos 最小值。
+    # v5 倒放即时起播，pos 相位随机：complete 出现时可能恰好回绕在段尾，
+    # 不能以 complete 为 break 条件——采到 pos 明确低于起点（真在倒退）再停。
     minpos = 9e9
-    deadline = time.time() + 30
+    deadline = time.time() + 45
     while time.time() < deadline:
         time.sleep(2)
         rr = jev(s, "JSON.stringify({c: rg.complete, on: rg.on, pos: +rg.pos.toFixed(2)})")
         if rr.get("on") and isinstance(rr.get("pos"), (int, float)):
             minpos = min(minpos, rr["pos"])
-        if rr.get("c") and rr.get("on") and time.time() > deadline - 24:
-            time.sleep(2)
-            rr2 = jev(s, "JSON.stringify({pos: +rg.pos.toFixed(2)})")
-            if isinstance(rr2.get("pos"), (int, float)):
-                minpos = min(minpos, rr2["pos"])
+            if minpos < r2.get("pos0", 0) - 0.5:
+                break
+    # 等后台补抓把整段细化（complete，~13.5s 段 / 1.8x ≈ 8s；minpos 可能提前达成）
+    dl2 = time.time() + 25
+    while time.time() < dl2:
+        rc = jev(s, "JSON.stringify({c: rg.complete, on: rg.on})")
+        if rc.get("c"):
             break
+        time.sleep(1.5)
     r3 = jev(s, """
     (function(){
       var c = activeClip();
@@ -427,12 +438,13 @@ def t_rev_grab(s, ctx):
     })()
     """, timeout_s=30)
     ok = (minpos < r2.get("pos0", 0)                                # pos 到过比起点更小的时间（在倒退）
-          and r3.get("complete") is True                            # 整段抓完
+          and instant                                               # v5：点倒放 1.5s 内已画出倒放帧（无准备等待）
+          and r3.get("complete") is True                            # 后台补抓把整段细化
           and (r3.get("cacheN") or 0) >= 20                         # 缓存帧数合理（0.08s 间隔）
           and r3.get("disabled") is not True
           and r3.get("restored") is True
           and r3.get("fwdPlaying") is True)
-    return ok, json.dumps({"start": r2, "run": r3}, ensure_ascii=False)
+    return ok, json.dumps({"start": r2, "instant": r22, "run": r3, "minpos": minpos}, ensure_ascii=False)
 
 
 @case("chrome-autohide", "chrome 自动隐藏：3 秒无操作后除播放键外的浮动按钮全部淡出，唤回后恢复")

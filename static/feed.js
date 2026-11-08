@@ -3846,21 +3846,26 @@ function revStartLoop() {
 }
 function revStopLoop() { rev.on = false; rgStop(); }
 
-/* ---- 倒放 v4：整段抓帧缓存 + 倒序显示 ----
-   v3 窗口流水线仍有窗界 seek 停顿（生产周期贴着消费率）。集锦段只有 ~10s，
-   干脆整段缓存：起倒放时后台 deck 以 2.5× 正放把整段抓成 JPEG 帧（canvas.toBlob
-   异步编码，~60KB/帧，10s 段约 120 帧 ≈ 8MB），抓完才开始倒序播放——显示零 seek、
-   零窗界停顿，段内回绕直接复用缓存瞬时重来（不重抓）。抓帧期间画布画
-   「倒放准备中 N%」。同一段再次倒放（暂停恢复/拖动 seek/换向回来）缓存命中瞬时起播。
-   不支持（无 createImageBitmap/toBlob、大屏单路解码 LOW_DECK_MODE）或运行失败 →
-   rg.disabled 本次会话退回 v2 乒乓。 */
-var RG_RATE = 1.8;         // 抓帧播放倍速：必须低于编码吞吐（0.08s 内容 / 36ms 编码 ≈ 2.2 内容-s/s），否则 currentTime 跳帧漏抓
-var RG_GRABMIN = 0.08;     // 抓帧最小内容间隔（秒）：currentTime 更新过密，限频省内存
+/* ---- 倒放 v5：被动预缓存 + 即时起播 + 后台补抓 ----
+   v4 起倒放要等整段抓完（6~9s「准备中」），用户等得难受。v5 把抓帧挪到正放
+   顺手做：正放/暂停时对主 deck 每 0.5s 内容时间抓一帧进缓存（被动抓帧，零
+   seek、不占备用 deck、不弹准备画面）。点倒放时缓存里已有看过的部分 → 立即
+   开始倒序显示（粗密度区间画面 0.5s 一换），同时备用 deck 以 1.8× 从细抓进度
+   （grabHi）继续把整段补抓到 0.08s 细密度——已缓存 JPEG 帧按 ts 有序插入，
+   显示循环二分定位天然用上更细的帧，几秒内从粗变细无感升级。回绕/同段再进
+   行为与 v4 一致。仅当缓存一帧都没有（进段立刻倒放、被动帧还没来得及抓）
+   才短暂显示「准备中」。不支持（无 createImageBitmap、LOW_DECK_MODE）或运行
+   失败 → rg.disabled 本次会话退回 v2 乒乓。 */
+var RG_RATE = 1.8;         // 补抓播放倍速：必须低于编码吞吐（0.08s 内容 / 36ms 编码 ≈ 2.2 内容-s/s），否则 currentTime 跳帧漏抓
+var RG_GRABMIN = 0.08;     // 补抓最小内容间隔（秒）：currentTime 更新过密，限频省内存
+var RG_PASMIN = 0.5;       // 被动抓帧最小内容间隔（秒）：用户指定密度，够倒放即时起播
 var RG_EPS = 0.03;
 var rg = {
   on: false, disabled: false,
-  cache: [],               // 升序 {ts, url}：整段帧缓存（JPEG dataURL，~9MB/段）
-  complete: false,         // 缓存已覆盖整段
+  cache: [],               // 升序 {ts, url}：帧缓存（被动粗帧 + 补抓细帧混合，~9MB/段）
+  complete: false,         // 补抓已把整段细化覆盖
+  grabHi: -1,              // 补抓推进的最高内容时间（被动帧不推进它；断点续抓起点）
+  pasTs: -1,               // 被动抓帧的上次内容时间（0.5s 限频）
   segKey: -1, segRef0: null, segTok: '',   // 缓存归属（段下标/段对象/场次），换段即失效
   deck: null,              // 抓帧 deck（任意时刻只允许一个在 seek，双 deck 并行 seek 互卡）
   lastT: -1, lastGrab: -1, grabStartAt: 0, lastPushAt: 0,
@@ -3901,11 +3906,6 @@ function rgStart(c, fromT) {
     $('.decks', c.el).parentNode.insertBefore(rg.cvs, c.algoMain);
   }
   rg.ctx = rg.cvs.getContext('2d');
-  if (!rg.gcvs) {
-    rg.gcvs = document.createElement('canvas');
-    rg.gcvs.width = 854; rg.gcvs.height = 356;
-    rg.gctx = rg.gcvs.getContext('2d');
-  }
   rgLayout();
   var head = seg.start + 0.12, end = seg.start + seg.dur - 0.02;
   if (fromT == null || fromT > end || fromT < head + 0.05) fromT = end;
@@ -3914,7 +3914,7 @@ function rgStart(c, fromT) {
   rg.cPtr = -1; rg.disp = null; rg.dec = null;
   // 缓存命中判定：同场次 + 同段下标 + 同一段对象（buildSegs 重建后段对象换代即失效）
   if (!(rg.cache.length && rg.segKey === c.idx && rg.segRef0 === seg && rg.segTok === c.token)) {
-    rg.cache = []; rg.complete = false;
+    rg.cache = []; rg.complete = false; rg.grabHi = -1;
     rg.segKey = c.idx; rg.segRef0 = seg; rg.segTok = c.token;
   }
   rg.last = performance.now();
@@ -3992,8 +3992,9 @@ function rgGrabKick() {
     d.seg = c.idx;
     d.everReady = true;
   }
-  // 断点续抓：从缓存已有的最高时间戳之后继续；空缓存从段头抓
-  var from = rg.cache.length ? rg.cache[rg.cache.length - 1].ts + RG_GRABMIN : seg.start + 0.12;
+  // 断点续抓：从补抓进度 grabHi 之后继续（被动粗帧不算细抓进度，会被重新扫细）；
+  // 空进度从段头抓
+  var from = rg.grabHi >= 0 ? rg.grabHi + RG_GRABMIN : seg.start + 0.12;
   rgWaitMeta(d.v, 10000).then(function (metaOk) {
     if (!rg.on || rg.deck !== d) return;
     if (!metaOk) { rgFail('deck metadata timeout'); return; }
@@ -4048,8 +4049,14 @@ function rgFail(msg) {
 }
 
 /** 抓一帧：drawImage → toDataURL 同步 JPEG 编码（~36ms/帧，62KB），按 ts 有序插入缓存。
- *  注意：本 WebView（Chrome 74）的 canvas.toBlob 静默丢全部回调（实测 0/35），必须用 toDataURL。 */
+ *  注意：本 WebView（Chrome 74）的 canvas.toBlob 静默丢全部回调（实测 0/35），必须用 toDataURL。
+ *  编码画布惰性创建：被动预缓存（rgPassiveTick）在 rgStart 之前就会调用本函数。 */
 function rgCapture(v, t) {
+  if (!rg.gcvs) {
+    rg.gcvs = document.createElement('canvas');
+    rg.gcvs.width = 854; rg.gcvs.height = 356;
+    rg.gctx = rg.gcvs.getContext('2d');
+  }
   try { rg.gctx.drawImage(v, 0, 0, 854, 356); } catch (e) { return; }
   rg.lastPushAt = performance.now();
   var url;
@@ -4108,7 +4115,7 @@ function rgShow() {
   var segEnd = seg.start + seg.dur;
   var head = seg.start + 0.12, endT = segEnd - 0.02;
 
-  /* -- 抓帧：deck 正放中，currentTime 变化即抓 -- */
+  /* -- 补抓：deck 正放中，currentTime 变化即抓 -- */
   var d = rg.deck;
   if (d) {
     var wv = d.v;
@@ -4119,15 +4126,17 @@ function rgShow() {
         rg.lastT = t;
         if (t >= endT || wv.ended) {
           rgCapture(wv, Math.min(t, endT));
+          rg.grabHi = endT;
           try { wv.pause(); } catch (e) {}
           d.rgBusy = false;
           rg.deck = null;
           rg.complete = true;
           diag('rg cache done n=' + rg.cache.length + ' t=' + t.toFixed(2) + ' endT=' + endT.toFixed(2) + ' ended=' + wv.ended);
         } else if (rg.lastGrab < 0 || t - rg.lastGrab >= RG_GRABMIN) {
-          if (rg.lastGrab < 0) diag('rg grab first t=' + t.toFixed(2) + ' want>=' + (seg.start + 0.12).toFixed(2));
+          if (rg.lastGrab < 0) diag('rg grab first t=' + t.toFixed(2) + ' grabHi=' + rg.grabHi.toFixed(2));
           rg.lastGrab = t;
           rgCapture(wv, t);
+          rg.grabHi = Math.max(rg.grabHi, t);
         }
       }
     }
@@ -4135,10 +4144,10 @@ function rgShow() {
     rgGrabKick();
   }
 
-  /* -- 未抓完：画准备进度，抓完再开始倒序显示 -- */
-  if (!rg.complete) {
-    var frac = rg.cache.length
-      ? clamp((rg.cache[rg.cache.length - 1].ts - head) / Math.max(0.1, endT - head), 0, 1)
+  /* -- 缓存一帧都没有（进段立刻倒放）：短暂画准备进度，抓到首帧即转倒序显示 -- */
+  if (!rg.cache.length) {
+    var frac = rg.grabHi >= head
+      ? clamp((rg.grabHi - head) / Math.max(0.1, endT - head), 0, 1)
       : 0;
     rg.lastPos = rg.pos;                 // 准备中切回正放：从发起倒放的位置恢复
     rgPreroll(frac);
@@ -4188,7 +4197,11 @@ function rgShow() {
   }
 
   /* -- HUD 节流刷新 -- */
-  if (now - rg.hudT > 250) { rg.hudT = now; c.hud(rg.pos, segEnd); }
+  if (now - rg.hudT > 250) {
+    rg.hudT = now; c.hud(rg.pos, segEnd);
+    // 补抓进行中：即使画面停在粗帧不动（缓存稀疏区间），进度小字也要刷新
+    if (!rg.complete && rg.disp) rgDraw(rg.disp.bm);
+  }
 }
 
 /** 绘制当前位图（contain 内接 + 黑边，几何与 video object-fit:contain 一致，
@@ -4204,6 +4217,44 @@ function rgDraw(bm) {
   var s = Math.min(cw / vw, ch / vh);
   var dw = vw * s, dh = vh * s;
   try { ctx.drawImage(bm, (cw - dw) / 2, (ch - dh) / 2, dw, dh); } catch (e) {}
+  // 后台补抓进行中：右上角低调进度标签（粗密度区间画面 0.5s 一换，抓细后无感变顺）
+  if (!rg.complete && rg.segRef) {
+    var head = rg.segRef.start + 0.12, endT = rg.segRef.start + rg.segRef.dur - 0.02;
+    var frac = rg.grabHi >= head ? clamp((rg.grabHi - head) / Math.max(0.1, endT - head), 0, 1) : 0;
+    var tag = '补帧中 ' + Math.round(frac * 100) + '%';
+    ctx.font = '500 ' + Math.max(10, Math.round(ch / 42)) + 'px sans-serif';
+    var tw = ctx.measureText(tag).width;
+    var tx = cw - tw - 22, ty = 26;
+    ctx.fillStyle = 'rgba(0,0,0,.4)';
+    ctx.fillRect(tx - 8, ty - 15, tw + 16, 22);
+    ctx.fillStyle = 'rgba(255,255,255,.75)';
+    ctx.textAlign = 'left';
+    ctx.fillText(tag, tx, ty);
+  }
+}
+
+/** 被动预缓存（v5 核心）：正放/暂停时对主 deck 每 RG_PASMIN 内容秒抓一帧进缓存，
+ *  点倒放时已有帧 → 即时起播（不再有 6~9s「准备中」）。零 seek、不占备用 deck，
+ *  与补抓 deck 互不干扰；帧按 ts 有序插入，补抓细帧混插其中互不冲突。 */
+function rgPassiveTick(c) {
+  if (!c || c.state !== 'ready' || c.idx < 0) return;
+  if (rg.on || rg.disabled || !rgCan()) return;
+  if (rev.on && rev.dir < 0) return;                   // v2 乒乓占用主 deck，不碰
+  if (rg.complete) return;                             // 细密度已全覆盖，粗帧无意义
+  var seg = c.segs[c.idx];
+  // 缓存归属维护：换段即清（与 rgStart 同一套 key）
+  if (!(rg.cache.length && rg.segKey === c.idx && rg.segRef0 === seg && rg.segTok === c.token)) {
+    rg.cache = []; rg.complete = false; rg.grabHi = -1;
+    rg.segKey = c.idx; rg.segRef0 = seg; rg.segTok = c.token;
+  }
+  var v = c.decks[c.activeDeck].v;
+  if (v.readyState < 2 || v.seeking) return;           // 拖动预览中不抓半帧
+  var head = seg.start + 0.12, endT = seg.start + seg.dur - 0.02;
+  var t = v.currentTime;
+  if (t < head - 0.2 || t > endT + 0.3) return;        // 拖到段外预览不抓
+  if (rg.pasTs >= 0 && Math.abs(t - rg.pasTs) < RG_PASMIN) return;   // 0.5s 限频（含暂停时 t 不变不重复抓）
+  rg.pasTs = t;
+  rgCapture(v, Math.min(t, endT));
 }
 
 /** 备用 deck 同源化：倒放全程用同一个媒体 URL（整段视频本就一个 src），
@@ -4848,7 +4899,8 @@ function tick(now) {
   var c = activeClip();
   if (c) c.tick(now);   // 播放推进（段末硬切 / 音画同步）离开播放页也继续
   // 跟焦分析是纯画面工作：离屏时整段停掉，把 CPU 让给列表滚动/页面动画
-  if (page === 1) {
+  if (page === 1 && c) {
+    rgPassiveTick(c);     // 被动预缓存：正放每 0.5s 内容抓一帧，倒放即时起播
     camSampleLive(now);   // 实时采样（6.7Hz）→ scene
     camTick(now);         // 平滑相机：轨迹/实时混合 + 缓动 + 落 transform
   }

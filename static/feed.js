@@ -329,9 +329,9 @@ var CLIP_HTML =
         '</div>' +
       '</div>' +
       '<div class="ch-bottom">' +
-        '<div class="bar"><div class="bar-fill"></div><div class="bar-knob"></div><div class="bar-tip"><b></b><span></span></div></div>' +
         '<div class="ctitle"></div>' +
         '<div class="csub"></div>' +
+        '<div class="bar"><div class="bar-fill"></div><div class="bar-knob"></div><div class="bar-tip"><b></b><span></span></div></div>' +
       '</div>' +
     '</div>' +
   '</div>';
@@ -987,6 +987,15 @@ ClipPlayer.prototype.prereadTrack = async function (d, i) {
 /** 下一段静音预热起播：段末硬切无黑帧的关键 */
 ClipPlayer.prototype.warmDeck = async function (d) {
   if (!d || !d.ready) return false;
+  if (!this.playing) {
+    // 用户已暂停：只备到段首待命，不起播。否则备用 deck 会在暂停期间一路
+    // 自己播——播过段尾就进入下一段的内容，之后点这段（快速路径 d.seg 命中）
+    // 就会从下一段内容开始播（真机「点 A 段播下一个片段」根因）
+    d.rolling = false;
+    try { d.v.pause(); } catch (e) {}
+    if (this.hasAudio) { try { d.a.pause(); } catch (e) {} }
+    return false;
+  }
   if (d.v.readyState < 3) return false;
   d.rolling = true;
   d.v.muted = true;
@@ -1095,13 +1104,24 @@ ClipPlayer.prototype.jumpTo = async function (i, opts) {
 
   // ---- 快速路径：已预热，直接硬切 ----
   var d = this.decks[1 - this.activeDeck];
-  if (d.seg === i && d.tracking && this.prereading) {
+  // deck 正被倒放缓存抓窗征用（rgBusy/1.8×/位置在抓帧点）时不得走快速路径：
+  // 抓窗会把它 seek 来 seek 去，硬切过去位置错乱——落到慢路径（会先停抓窗）
+  if (d.seg === i && d.tracking && this.prereading && rg.deck !== d) {
     // 预热段还在预读识别：等它算完再切，保证起播就有焦点轨迹
     this.busy = true;
     try { await this.prereading; } catch (e) {}
     this.busy = false;
   }
-  if (d.seg === i && d.ready && !d.tracking && (d.v.readyState >= 2 || d.everReady)) {
+  if (d.seg === i && d.ready && !d.tracking && rg.deck !== d && (d.v.readyState >= 2 || d.everReady)) {
+    // 落点校验：seg 标记对 ≠ 位置对。备用 deck 可能停在段尾附近（warmDeck
+    // 起播后被暂停/抓窗残留）——从段尾起播会立刻段末推进下一段，用户感受
+    // 就是「点 A 段播的是下一个片段」。快速路径只接受段头附近的预热位
+    // （正常硬切时备用位置 ≤ start+LEAD+warmLead≈1s），其余落慢路径重新
+    // prepare（seek 回段头并校验落点）
+    var segQ = this.segs[i];
+    var tQ = d.v.currentTime;
+    var posOk = tQ >= segQ.start - 1.0 && tQ <= segQ.start + 2.5;
+    if (posOk) {
     this.busy = true;
     this.idx = i;
     this.pendingIdx = -1;
@@ -1122,6 +1142,7 @@ ClipPlayer.prototype.jumpTo = async function (i, opts) {
     this.prepareNext();
     diag('cut fast idx=' + i + '/' + this.segs.length);
     return;
+    }
   }
 
   // ---- 慢路径：真的加载（400ms 后才亮遮罩） ----
@@ -1130,6 +1151,11 @@ ClipPlayer.prototype.jumpTo = async function (i, opts) {
   // seek 会和预读的采样 seek 打架，起播位置错乱（点 A 段却播到别段内容）
   if (this.preparing) { try { await this.preparing; } catch (e) {} this.preparing = null; }
   if (this.prereading) { try { await this.prereading; } catch (e) {} this.prereading = null; }
+  // 倒放缓存抓窗若正占用备用 deck 必须先停（与 prepare 的 seek 在同一 deck 上
+  // 打架——WebView 双向 seek 互卡/v3 时代同款；且抓窗会把 deck 位置拉到段尾
+  // 抓帧点，起播校验窗口期被再 seek 走 → 从段尾起播 → 瞬间跳进下一段）。
+  // 缓存保留；回正放后 rgGrabTick 会续抓，换段后按段守卫自然停摆
+  if (rg.deck) rgGrabHalt();
   var veilShown = false;
   var veilTimer = setTimeout(function () {
     if (self.busy && !veilShown) {
@@ -1291,7 +1317,7 @@ ClipPlayer.prototype.loopCurrent = function () {
   if (!seg) return;
   this.lastSwitchAt = performance.now();
   var d = this.decks[1 - this.activeDeck];
-  if (d.seg === i && d.ready && !d.tracking && !d.rolling &&
+  if (d.seg === i && d.ready && !d.tracking && !d.rolling && rg.deck !== d &&
       (d.v.readyState >= 2 || d.everReady)) {
     this.jumpTo(i);
     return;
@@ -1336,6 +1362,18 @@ ClipPlayer.prototype.tick = function (now) {
   if (this.idx >= 0 && now - this.lastPosSave > 2000) {
     this.lastPosSave = now;
     this.savePos();
+  }
+  // 越段兜底：预热起播的备用 deck 若越过自己段尾（硬切延迟/暂停竞争残留），
+  // 播的已是下一段的内容——停回待命，防快速路径误命中后播错段
+  var sd = this.decks[1 - this.activeDeck];
+  if (sd && sd.rolling && sd.seg >= 0 && !sd.v.paused) {
+    var ss = this.segs[sd.seg];
+    if (ss && sd.v.currentTime > ss.start + ss.dur + 0.5) {
+      try { sd.v.pause(); } catch (e) {}
+      if (this.hasAudio) { try { sd.a.pause(); } catch (e) {} }
+      sd.rolling = false;
+      diag('standby overrun guard seg=' + sd.seg + ' t=' + sd.v.currentTime.toFixed(1));
+    }
   }
   if (!this.playing || this.busy || this.idx < 0) return;
   if (rev.dir < 0) return;   // 倒放中：时间轴由 revStep 乒乓流水驱动，段末判断 / 预热跟随全跳过
@@ -3976,7 +4014,8 @@ function rgStop() {
 function rgGrabKick(c) {
   c = c || rg.c || activeClip();
   var seg = c ? c.segs[c.idx] : rg.segRef;
-  if (rg.complete || rg.disabled || !c || rg.deck || !seg || c.idx < 0) return;
+  // jumpTo/切段进行中不得征用 deck（慢路径 prepare 正在做 seek，同 deck 打架）
+  if (rg.complete || rg.disabled || !c || rg.deck || !seg || c.idx < 0 || c.busy) return;
   var d = null;
   for (var i = 0; i < c.decks.length; i++) {
     // 必须排除活动 deck：冷启动/换段后 rgBusy 全空，抓窗会选中用户正在看的

@@ -236,6 +236,9 @@ body.split .magview { display: block; }
   transition: opacity .3s ease;
 }
 body.chrome-off .chrome { opacity: 0; }
+/* 隐藏时子元素热区一并关闭：点屏幕统一走 onTap（暂停/继续+唤回），
+   不得透传触发隐藏控件位置的点击动作（进度条 seek、顶部按钮等） */
+body.chrome-off .chrome > * { pointer-events: none; }
 .chrome > * { pointer-events: auto; }
 
 /* ---------- 浮动按钮与进度条同进退（播放键常驻，其余跟随 chrome 显隐） ---------- */
@@ -280,7 +283,7 @@ body.chrome-off #segFloat { opacity: 0; pointer-events: none; }
 .ch-bottom {
   position: absolute;
   bottom: 0; left: 0; right: 0;
-  padding: 0 14px 13px;
+  padding: 0 14px 9px;
   background: linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, .55));
 }
 .bar {
@@ -288,7 +291,7 @@ body.chrome-off #segFloat { opacity: 0; pointer-events: none; }
   background: rgba(255, 255, 255, .16);
   border-radius: 2px;
   overflow: hidden;
-  margin-bottom: 8px;
+  margin-top: 8px;   /* bar 在文字下方：与 ctitle/csub 留间距，整体贴底 */
 }
 .bar-fill { height: 100%; width: 0; background: #00aeec; }
 .ctitle {

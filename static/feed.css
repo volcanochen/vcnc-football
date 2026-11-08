@@ -906,14 +906,12 @@ body.segfloat-off .segfloat { display: none !important; }
 }
 /* 单片段循环：锁定当前段，再点解除（入口只在播放控件里，浮窗行不再带锁） */
 #cornerCtl .cbtn.loop {
-  font-size: 13px;
   border: 1px solid rgba(255, 255, 255, .22);
   background: rgba(255, 255, 255, .06);
 }
 #cornerCtl .cbtn.loop.on {
   background: #f0a020;
   color: #1a1200;
-  font-weight: 600;
   border-color: transparent;
 }
 #cornerCtl .csep {
@@ -997,27 +995,28 @@ body.seeking .bar-fill { background: #f0a020; }
 .bar-tip b { display: block; color: #fff; font-size: 16px; font-weight: 600; text-shadow: 0 1px 3px rgba(0, 0, 0, .8); }
 .bar-tip span { display: block; color: rgba(255, 255, 255, .72); font-size: 11px; padding-top: 1px; }
 
-/* 倒放按钮：箭头比播放键小一号，激活态与「锁」同款橙色 */
+/* 倒放方向切换按钮：双向箭头 SVG，激活态与「循环」同款橙色 */
 #cornerCtl .cbtn.rev {
-  font-size: 13px;
-  letter-spacing: -2px;
   color: rgba(255, 255, 255, .85);
 }
 #cornerCtl .cbtn.rev.on {
   background: #f0a020;
   color: #1a1200;
-  font-weight: 600;
+}
+#cornerCtl .cbtn.rev svg,
+#cornerCtl .cbtn.loop svg,
+#cornerCtl .cbtn.track svg {
+  width: 23px;
+  height: 23px;
 }
 
-/* 跟踪球按钮：激活态青蓝色（与「锁」的橙色区分） */
+/* 跟踪球按钮：四角取景框+球 SVG，激活态青蓝色（与「循环」的橙色区分） */
 #cornerCtl .cbtn.track {
-  font-size: 13px;
   border: 1px solid rgba(255, 255, 255, .22);
   background: rgba(255, 255, 255, .06);
 }
 #cornerCtl .cbtn.track.on {
   background: #00aeec;
   color: #fff;
-  font-weight: 600;
   border-color: transparent;
 }

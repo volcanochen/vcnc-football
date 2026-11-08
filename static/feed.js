@@ -1504,12 +1504,9 @@ ClipPlayer.prototype.render = function () {
     this.veil.classList.remove('on');
   }
 
-  if (this.active && this.state === 'ready' && !this.playing) {
-    this.bigplay.classList.add('show');
-    this.bigplay.innerHTML = ICON_PLAY;
-  } else {
-    this.bigplay.classList.remove('show');
-  }
+  // 暂停/就绪态不再在画面中央弹播放 OSD（用户反馈：画面中间不要显示播放提示），
+  // 恢复播放一律走左下角播放键；bigplay DOM 保留但恒不显示
+  this.bigplay.classList.remove('show');
   syncPlayIcon();   // 左下角播放/暂停图标与状态同步
   syncSegFloatActive();   // 跳段后立刻高亮浮窗当前行（不必等下一次 hud）
 };
@@ -3032,8 +3029,7 @@ function syncSegFloatActive() {
   var lb = $('#btnLoop');
   if (lb) {
     var locked = loopIdx >= 0 && loopBvid === bv;
-    lb.classList.toggle('on', locked);
-    lb.textContent = locked ? '解' : '锁';
+    lb.classList.toggle('on', locked);   // 图标固定（循环箭头），锁定态由橙色底区分
     lb.title = locked ? '解除单段循环' : '锁定当前片段循环播放';
   }
 }

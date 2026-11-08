@@ -3979,7 +3979,10 @@ function rgGrabKick(c) {
   if (rg.complete || rg.disabled || !c || rg.deck || !seg || c.idx < 0) return;
   var d = null;
   for (var i = 0; i < c.decks.length; i++) {
-    if (!c.decks[i].rgBusy) { d = c.decks[i]; break; }
+    // 必须排除活动 deck：冷启动/换段后 rgBusy 全空，抓窗会选中用户正在看的
+    // deck——seek 回段头、1.8×、静音，暂停/继续后画面异常（真机复现的
+    // 「暂停后继续卡住」根因）。备用的deck被预热/预读占用时宁可本轮不抓。
+    if (i !== c.activeDeck && !c.decks[i].rgBusy) { d = c.decks[i]; break; }
   }
   if (!d) return;
   d.rgBusy = true;
@@ -4035,6 +4038,9 @@ function rgGrabTick(c) {
     if (!suspend) rgGrabKick(c);      // 静默期不派发；pre-roll/断粮/非倒放播放在抓
     return;
   }
+  // 段末硬切会翻转 activeDeck：抓窗 deck 身份互换成了活动 deck 时立即释放，
+  // 只解绑不 pause（画面正在给用户看），速率交回 syncAudio/slowBase 管理
+  if (d === c.decks[c.activeDeck]) { rgGrabHalt(); return; }
   var wv = d.v;
   if (suspend) {
     if (!wv.paused) { try { wv.pause(); } catch (e) {} }
@@ -4054,6 +4060,7 @@ function rgGrabTick(c) {
         rgCapture(wv, Math.min(t, endT));
         rg.grabHi = endT;
         try { wv.pause(); } catch (e) {}
+        try { wv.playbackRate = 1; } catch (e) {}   // 释放前恢复标称速率，防 1.8× 残留
         d.rgBusy = false;
         rg.deck = null;
         rg.complete = true;
@@ -4068,13 +4075,18 @@ function rgGrabTick(c) {
   }
 }
 
-/** 细抓中止：仅停当前抓窗把 deck 复位（不清缓存不置 disabled，下次满足条件再续抓） */
+/** 细抓中止：仅停当前抓窗把 deck 复位（不清缓存不置 disabled，下次满足条件再续抓）。
+ *  deck 若已因段切换身份互换变成活动 deck，只解绑不动它（画面正在给用户看，
+ *  pause 会冻结画面），速率交回 syncAudio/slowBase 校准。 */
 function rgGrabHalt() {
-  if (rg.deck) {
-    try { rg.deck.v.pause(); } catch (e) {}
-    rg.deck.rgBusy = false;
-    rg.deck = null;
-  }
+  if (!rg.deck) return;
+  var d = rg.deck;
+  rg.deck = null;
+  d.rgBusy = false;
+  var c = activeClip();
+  if (c && d === c.decks[c.activeDeck]) return;
+  try { d.v.pause(); } catch (e) {}
+  try { d.v.playbackRate = 1; } catch (e) {}
 }
 
 /** 等 video 元数据可 seek（备用 deck 冷态时 setSrc 后要等 loadedmetadata） */
@@ -4169,7 +4181,7 @@ function rgDecode(item) {
   })['catch'](function () {
     if (rg.dec && rg.dec.ts === ts) rg.dec.fail = true;
   });
-  rg.dec = { ts: ts, bm: null, p: p };
+  rg.dec = { ts: ts, bm: null, p: p, at: performance.now() };
 }
 
 /** 显示主循环（rAF）：抓帧 →（抓完）推进 pos → 换帧 → HUD */
@@ -4229,7 +4241,9 @@ function rgShow() {
       if (old) { try { old.bm.close(); } catch (e) {} }
       // 先行解码下一帧（倒放方向是 i-1），下次换帧零等待
       if (i > 0 && arr[i - 1].ts < want.ts - RG_EPS) rgDecode(arr[i - 1]);
-    } else if (!rg.dec || rg.dec.ts !== want.ts) {
+    } else if (!rg.dec || rg.dec.ts !== want.ts || rg.dec.fail || now - rg.dec.at > 3000) {
+      // fail/超时重试：解码 promise 挂起或失败后若永不重试，pos 会被钳死在
+      // disp.ts（画面永久冻结、倒放循环空转）——真机「暂停后继续卡住」现场之一
       if (rg.dec && rg.dec.bm) { try { rg.dec.bm.close(); } catch (e) {} }
       rgDecode(want);
     }

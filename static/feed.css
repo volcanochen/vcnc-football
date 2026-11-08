@@ -707,20 +707,21 @@ body.chrome-off .chrome { opacity: 0; }
 }
 #fatal[hidden] { display: none; }
 
-/* ---------- 集锦浮窗：靠左半透明，本场片段跳转 / 单段循环 ---------- */
+/* ---------- 集锦浮窗：靠右窄条半透明，尽量少遮画面；标题=集锦/全场切换 ---------- */
 .segfloat {
   position: absolute;
-  left: 0;
+  left: auto;
+  right: 0;
   top: 52px;
-  bottom: 116px;          /* 避开左下角控制条；高度随屏幕高度自适应 */
-  width: 142px;
+  bottom: 116px;          /* 避开右下角「恢复画面」按钮区；高度随屏幕高度自适应 */
+  width: 118px;
   z-index: 42;
   display: none;
   flex-direction: column;
-  background: rgba(8, 12, 17, .82);   /* 压住视频烧录时间码/水印，仍保留半透明 */
+  background: rgba(8, 12, 17, .72);   /* 压住视频烧录时间码/水印，仍保留半透明 */
   border: 1px solid rgba(255, 255, 255, .13);
-  border-left: none;
-  border-radius: 0 10px 10px 0;
+  border-right: none;
+  border-radius: 10px 0 0 10px;
   color: #fff;
   overflow: hidden;
   touch-action: pan-y;
@@ -729,32 +730,46 @@ body[data-page="1"] .segfloat { display: flex; }
 /* 竖屏分屏：浮窗只占上半主画面区域，别盖住下半放大镜 */
 body.split[data-page="1"] .segfloat { bottom: 52%; }
 body.segfloat-off .segfloat { display: none !important; }
-.segfloat.fold { width: 30px; bottom: auto; border-radius: 0 8px 8px 0; }
+/* 收起态：整条窄把手，点「‹」展开 */
+.segfloat.fold { width: 34px; bottom: auto; border-radius: 8px 0 0 8px; }
 .segfloat.fold .sf-title,
 .segfloat.fold .sf-count,
-.segfloat.fold .sf-body,
-.segfloat.fold .sf-foot { display: none; }
-.segfloat.fold .sf-head { padding: 0; justify-content: center; }
+.segfloat.fold .sf-body { display: none; }
+.segfloat.fold .sf-head { padding: 0; justify-content: center; height: 40px; }
+.segfloat.fold .sf-fold { width: 30px; height: 34px; font-size: 18px; }
 .sf-head {
   display: flex;
   align-items: center;
-  height: 30px;
+  height: 32px;
   flex: none;
-  padding: 0 6px 0 9px;
+  padding: 0 5px 0 8px;
   border-bottom: 1px solid rgba(255, 255, 255, .1);
   font-size: 11px;
 }
-.sf-title { color: rgba(255, 255, 255, .9); font-weight: 600; letter-spacing: .5px; }
+.sf-title {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, .9);
+  font-weight: 600;
+  letter-spacing: .5px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
 .sf-count { margin-left: auto; margin-right: 4px; color: rgba(255, 255, 255, .5); font-size: 10px; }
 .sf-fold {
   flex: none;
-  width: 22px; height: 22px;
+  width: 26px; height: 26px;
   border: none;
-  border-radius: 5px;
-  background: rgba(255, 255, 255, .09);
-  color: rgba(255, 255, 255, .8);
-  font-size: 15px;
-  line-height: 20px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .12);
+  color: rgba(255, 255, 255, .85);
+  font-size: 17px;
+  line-height: 24px;
   font-family: inherit;
   cursor: pointer;
 }
@@ -779,8 +794,8 @@ body.segfloat-off .segfloat { display: none !important; }
 .sf-row.on { background: rgba(0, 174, 236, .34); }
 .sf-row.loop { background: rgba(240, 160, 32, .3); }
 .sf-row.loop.on { background: rgba(240, 160, 32, .42); }
-.sf-no { width: 19px; flex: none; color: rgba(255, 255, 255, .45); }
-.sf-t { width: 46px; flex: none; color: rgba(255, 255, 255, .9); }
+.sf-no { width: 16px; flex: none; color: rgba(255, 255, 255, .45); }
+.sf-t { width: 44px; flex: none; color: rgba(255, 255, 255, .9); }
 .sf-note {
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -800,30 +815,23 @@ body.segfloat-off .segfloat { display: none !important; }
   cursor: pointer;
 }
 .sf-lock.on { background: #f0a020; color: #1a1200; font-weight: 600; }
-.sf-foot {
-  flex: none;
-  display: flex;
-  align-items: center;
-  min-height: 26px;
-  padding: 3px 5px 3px 7px;
-  border-top: 1px solid rgba(255, 255, 255, .1);
-  font-size: 10px;
-  color: rgba(255, 255, 255, .55);
-}
-.sf-state { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sf-unlock {
-  flex: none;
-  margin-left: 4px;
-  border: none;
-  border-radius: 4px;
-  padding: 3px 5px;
-  background: rgba(240, 160, 32, .85);
-  color: #1a1200;
-  font-size: 10px;
+
+/* ---------- 恢复画面：用户双指调整取景后浮出（右下角，所有模式通用） ---------- */
+#viewReset {
+  position: absolute;
+  right: 12px;
+  bottom: 64px;
+  z-index: 45;
+  padding: 10px 16px;
+  border: 1px solid rgba(255, 255, 255, .22);
+  border-radius: 20px;
+  background: rgba(8, 12, 17, .66);
+  color: rgba(255, 255, 255, .92);
+  font-size: 12px;
   font-family: inherit;
   cursor: pointer;
 }
-.sf-unlock[hidden] { display: none; }
+#viewReset[hidden] { display: none; }
 
 /* ---------- 亮度遮罩（左半屏上下滑动调节） ---------- */
 #brightMask {
@@ -928,35 +936,39 @@ body.segfloat-off .segfloat { display: none !important; }
   text-shadow: 0 1px 3px rgba(0, 0, 0, .8);
 }
 
-/* 横滑快进/回退 OSD：居中胶囊，显示增量与目标时间 */
-#seekOsd {
+/* 横滑 seek：不弹居中提示，变化直接显示在底部进度条上（放大 + 圆点 + 气泡）。
+   拖动期间强制点亮 chrome（该规则写在 chrome-off 之后，同特异性后者胜出） */
+body.seeking .chrome { opacity: 1; }
+body.seeking .bar { height: 5px; margin-bottom: 16px; overflow: visible; }
+body.seeking .bar-fill { background: #f0a020; }
+.bar { position: relative; }
+.bar-knob {
   position: absolute;
-  top: 46%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  padding: 10px 18px;
-  border-radius: 22px;
-  background: rgba(8, 12, 17, .72);
-  text-align: center;
-  z-index: 46;
+  top: 50%;
+  left: 0;
+  width: 14px; height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  background: #f0a020;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .35);
+  display: none;
   pointer-events: none;
-  opacity: 0;
-  transition: opacity .2s;
 }
-#seekOsd.on { opacity: 1; }
-#seekOsd b {
-  display: block;
-  color: #fff;
-  font-size: 22px;
-  font-weight: 600;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, .8);
+.bar-tip {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 11px;
+  border-radius: 14px;
+  background: rgba(8, 12, 17, .8);
+  white-space: nowrap;
+  text-align: center;
+  display: none;
+  pointer-events: none;
 }
-#seekOsd span {
-  display: block;
-  color: rgba(255, 255, 255, .75);
-  font-size: 12px;
-  padding-top: 2px;
-}
+.bar-tip b { display: block; color: #fff; font-size: 16px; font-weight: 600; text-shadow: 0 1px 3px rgba(0, 0, 0, .8); }
+.bar-tip span { display: block; color: rgba(255, 255, 255, .72); font-size: 11px; padding-top: 1px; }
 
 /* 倒放按钮：箭头比播放键小一号，激活态与「锁」同款橙色 */
 #cornerCtl .cbtn.rev {
@@ -968,4 +980,17 @@ body.segfloat-off .segfloat { display: none !important; }
   background: #f0a020;
   color: #1a1200;
   font-weight: 600;
+}
+
+/* 跟踪球按钮：激活态青蓝色（与「锁」的橙色区分） */
+#cornerCtl .cbtn.track {
+  font-size: 13px;
+  border: 1px solid rgba(255, 255, 255, .22);
+  background: rgba(255, 255, 255, .06);
+}
+#cornerCtl .cbtn.track.on {
+  background: #00aeec;
+  color: #fff;
+  font-weight: 600;
+  border-color: transparent;
 }

@@ -104,6 +104,19 @@ function setSrc(media, url) {
   return true;
 }
 
+/** 带超时的 fetch：本地代理偶发不响应时不必干等浏览器默认超时（修冷启动偶发卡住） */
+function fetchTimeout(url, ms) {
+  if (typeof AbortController !== 'undefined') {
+    var ac = new AbortController();
+    var t = setTimeout(function () { try { ac.abort(); } catch (e) {} }, ms || 15000);
+    return fetch(url, { signal: ac.signal }).then(
+      function (r) { clearTimeout(t); return r; },
+      function (e) { clearTimeout(t); throw e; }
+    );
+  }
+  return fetch(url);
+}
+
 function toSec(tok) {
   tok = String(tok == null ? '' : tok).trim().toLowerCase().replace(/：/g, ':').replace(/[^\d\.:hms]/g, '');
   if (!tok) return null;
@@ -314,7 +327,7 @@ var CLIP_HTML =
         '</div>' +
       '</div>' +
       '<div class="ch-bottom">' +
-        '<div class="bar"><div class="bar-fill"></div></div>' +
+        '<div class="bar"><div class="bar-fill"></div><div class="bar-knob"></div><div class="bar-tip"><b></b><span></span></div></div>' +
         '<div class="ctitle"></div>' +
         '<div class="csub"></div>' +
       '</div>' +
@@ -396,6 +409,8 @@ function ClipPlayer(item, index) {
   this.titleEl = $('.ctitle', this.el);
   this.subEl = $('.csub', this.el);
   this.fillEl = $('.bar-fill', this.el);
+  this.knobEl = $('.bar-knob', this.el);
+  this.tipEl = $('.bar-tip', this.el);
   this.bigplay = $('.bigplay', this.el);
   this.focusBox = $('.focus-box', this.el);
 
@@ -444,7 +459,19 @@ ClipPlayer.prototype.resolve = async function () {
   this.state = 'loading';
   this.render();
   try {
-    var j = await (await fetch('/api/resolve?url=' + encodeURIComponent(this.item.bvid) + '&qn=' + QN + cookieParam('&'))).json();
+    // 解析请求：超时 15s + 失败静默重试一次（冷启动偶发卡住的主因就在这一步）
+    var j = null, lastErr = null;
+    for (var att = 0; att < 2; att++) {
+      try {
+        j = await (await fetchTimeout('/api/resolve?url=' + encodeURIComponent(this.item.bvid) + '&qn=' + QN + cookieParam('&'), 15000)).json();
+        break;
+      } catch (e2) {
+        lastErr = e2;
+        diag('resolve fetch retry' + att + ': ' + (e2 && (e2.name || e2.message)));
+        if (att === 0) await sleep(900);
+      }
+    }
+    if (!j) throw lastErr || new Error('解析失败');
     if (!j.ok) throw new Error(j.error || '解析失败');
     this.token = j.token;
     this.info = j;
@@ -590,12 +617,16 @@ ClipPlayer.prototype.prepare = async function (d, i, lead) {
   setSrc(d.v, '/api/media/' + this.token + '/v?i=0');
   if (this.hasAudio) setSrc(d.a, '/api/media/' + this.token + '/a?i=0');
 
-  if (d.v.readyState < 1) await once(d.v, 'loadedmetadata', 15000);
-  if (this.hasAudio && d.a.readyState < 1) await once(d.a, 'loadedmetadata', 15000);
-  if (d.v.readyState < 1) {
-    diag('prepare-fail rs=' + d.v.readyState + ' net=' + d.v.networkState);
-    return false;
+  if (d.v.readyState < 1 && !await once(d.v, 'loadedmetadata', 9000)) {
+    // 元数据迟迟不来：换带随机参数的 URL 重试一次（绕开本地代理偶发的卡死响应）
+    diag('prepare v-meta slow, retry with cache-bust rs=' + d.v.readyState);
+    setSrc(d.v, '/api/media/' + this.token + '/v?i=0&r=' + Math.random().toString(36).slice(2));
+    if (!await once(d.v, 'loadedmetadata', 9000)) {
+      diag('prepare-fail rs=' + d.v.readyState + ' net=' + d.v.networkState);
+      return false;
+    }
   }
+  if (this.hasAudio && d.a.readyState < 1 && !await once(d.a, 'loadedmetadata', 8000)) return false;
   await seekTo(d.v, t);
   if (this.hasAudio) await seekTo(d.a, t);
   await waitBuffered(d.v, Math.min(2.4, Math.max(1.0, seg.dur * 0.5)), 15000);
@@ -1011,10 +1042,33 @@ ClipPlayer.prototype.tick = function (now) {
     this.savePos();
   }
   if (!this.playing || this.busy || this.idx < 0) return;
-  if (rev.dir < 0) return;   // 倒放中：时间轴由 revApply 驱动，段末判断 / 预热跟随全跳过
+  if (rev.dir < 0) return;   // 倒放中：时间轴由 revStep 乒乓流水驱动，段末判断 / 预热跟随全跳过
   var cur = this.decks[this.activeDeck];
   var seg = this.segs[this.idx];
   if (!seg) return;
+  // 卡死看门狗：状态上是「在播」，但解码器停住（元素被内部暂停 / readyState 掉底）
+  // → 先轻推 currentTime 强制重新出帧；反复推不活 → 重新准备本段。修两类真机问题：
+  //    ① 横滑回退后画面冻住  ② 暂停后继续播放画面不动
+  if (cur.v.paused || cur.v.readyState < 2) {
+    if (!this.stallSince) {
+      this.stallSince = now;
+    } else if (now - this.stallSince > 1500) {
+      this.stallSince = now;
+      this.stallTries = (this.stallTries || 0) + 1;
+      if (this.stallTries <= 3) {
+        diag('stall nudge #' + this.stallTries + ' idx=' + this.idx +
+          ' rs=' + cur.v.readyState + ' paused=' + cur.v.paused);
+        try { cur.v.currentTime = Math.max(seg.start, cur.v.currentTime + 0.02); } catch (e) {}
+        safePlay(cur.v);
+        if (this.hasAudio) safePlay(cur.a);
+      } else {
+        this.stallTries = 0;
+        diag('stall re-prepare idx=' + this.idx);
+        this.jumpTo(this.idx, { seekOffset: clamp(cur.v.currentTime - seg.start, 0, seg.dur) });
+        return;
+      }
+    }
+  } else { this.stallSince = 0; this.stallTries = 0; }
   var end = seg.start + seg.dur;
   var ct = cur.v.currentTime;
   this.followPreheated(ct, end);
@@ -2125,6 +2179,7 @@ function camApply() {
   var c = activeClip();
   if (!c) return;
   var split = isSplit();
+  updateViewReset();
   var s = cam.zoom;
   var v, w, h, ov;
   if (split) {
@@ -2145,8 +2200,13 @@ function camApply() {
   if (!v) return;
   // contain 时视频内容比容器小（有黑边）：平移/放大必须按「实际内容尺寸」算，
   // 否则 s=1.x 时会把黑边当成画面推来推去，甚至露出新的黑边。
+  // 实际内容尺寸：contain（或双指接管期）= 完整画面内接于容器；
+  // cover 布满容器，但被裁掉的源画面内容永远渲染不出来——双指接管时已先切 contain
   var cw = w, ch = h;
-  if (!split && SETTINGS.fit === 'contain' && v.videoWidth && v.videoHeight) {
+  var fitNow = manualFit ? 'contain'
+    : (split ? (v.style.objectFit || 'cover')
+             : (SETTINGS.fit === 'cover' ? 'cover' : 'contain'));
+  if (fitNow === 'contain' && v.videoWidth && v.videoHeight) {
     var vr = v.videoWidth / v.videoHeight, br = w / Math.max(1, h);
     if (vr > br) ch = w / vr; else cw = h * vr;
   }
@@ -2617,8 +2677,20 @@ function renderSegFloat(force) {
     cnt.textContent = !segs ? '—'
       : (total > segs.length ? (segs.length + '/' + total + ' 段') : (segs.length + ' 段'));
   }
+  var tt = $('#sfTitle');
+  if (tt) tt.textContent = SETTINGS.mode === 'full' ? '全场' : '集锦';
   sfLastIdx = -2;
   syncSegFloatActive();
+}
+
+/** 集锦浮窗标题点击：集锦连播 ↔ 全场录像 */
+function togglePlayMode() {
+  SETTINGS.mode = (SETTINGS.mode === 'hl') ? 'full' : 'hl';
+  saveSettings();
+  syncSettingsUI();
+  var tt = $('#sfTitle');
+  if (tt) tt.textContent = SETTINGS.mode === 'full' ? '全场' : '集锦';
+  rebuildActiveSegs(SETTINGS.mode === 'full' ? '切换全场录像' : '切换集锦连播');
 }
 
 /** 当前段高亮 + 锁定态 + 自动滚动到可见；有状态守卫，不随帧重复改 DOM */
@@ -2707,9 +2779,13 @@ function bindSegFloat() {
     fold.addEventListener('click', function () {
       var el = $('#segFloat');
       el.classList.toggle('fold');
-      fold.textContent = el.classList.contains('fold') ? '›' : '‹';
+      // 浮窗在右侧：展开态箭头指右（收过去），收起态箭头指左（拉出来）
+      fold.textContent = el.classList.contains('fold') ? '‹' : '›';
     });
   }
+  // 标题「集锦/全场」= 播放内容切换按钮
+  var sfT = $('#sfTitle');
+  if (sfT) sfT.addEventListener('click', togglePlayMode);
   // 单段循环唯一入口：左下角播放控件的「锁 / 解」
   var lb = $('#btnLoop');
   if (lb) lb.addEventListener('click', function () {
@@ -2920,6 +2996,7 @@ function startPinch() {
     saveSettings();
   }
   camManual(true);                 // 持续接管，不再定时恢复
+  manualFitOn();                   // cover 裁掉的两侧也要能到达：接管期间切 contain
   syncZoomIcons();
   var sw = $('#autoSw');
   if (sw) sw.classList.remove('on');
@@ -2945,14 +3022,59 @@ function movePinch() {
   camApply();
 }
 
-/** 手指离开：倍率与画面中心原样保留，不恢复自动跟踪 */
+/** 手指离开：倍率与画面中心原样保留，不恢复自动跟踪；浮出「恢复画面」按钮 */
 function endPinch() {
   gesture = 'none';
   camManual(true);
+  updateViewReset();
   if (pinch.turnedOff) {
     toast('自定义缩放 ' + SETTINGS.zoom.toFixed(2) + '× · 已停跟踪（设置里可开回自动跟焦）');
     pinch.turnedOff = false;
   }
+}
+
+/* ---------- 用户自助取景：cover→contain 切换 + 恢复画面按钮 ----------
+   object-fit: cover 的元素，被裁掉的源画面内容永远渲染不出来，怎么平移都到不了；
+   双指接管期间把取景用的 video 切到 contain，全画面任意位置就都可达了。
+   「恢复画面」一键回到 1.00× 居中并还原 object-fit（所有模式通用）。 */
+var manualFit = false;      // 双指接管期间 cover→contain
+var vrShown = false;        // 恢复按钮当前显隐（防每帧写 DOM）
+function manualFitOn() {
+  manualFit = true;
+  var c = activeClip();
+  if (!c) return;
+  if (isSplit() && c.magV) c.magV.style.objectFit = 'contain';
+  else for (var i = 0; i < c.decks.length; i++) c.decks[i].v.style.objectFit = 'contain';
+}
+function manualFitOff() {
+  if (!manualFit) return;
+  manualFit = false;
+  var c = activeClip();
+  if (c && c.magV) c.magV.style.objectFit = 'cover';
+  applyFit();               // 主画面的 object-fit 回「画面填充」设置（内部会 camApply）
+}
+/** 用户调整过取景（缩放/平移/切换 contain）→ 浮出「恢复画面」 */
+function updateViewReset() {
+  var touched = cam.manual && (SETTINGS.zoom > 1.001 ||
+    Math.abs(cam.x - 0.5) > 0.004 || Math.abs(cam.y - 0.5) > 0.004 || manualFit);
+  if (touched === vrShown) return;
+  vrShown = touched;
+  var b = $('#viewReset');
+  if (b) b.hidden = !touched;
+}
+function resetView() {
+  SETTINGS.zoom = 1;
+  saveSettings();
+  syncZoomChips();
+  cam.x = cam.tx = 0.5;
+  cam.y = cam.ty = 0.5;
+  cam.zoom = cam.tz = 1;
+  cam.lx = -1; cam.ly = -1; cam.lz = -1;   // 强制下一帧重写 transform
+  manualFitOff();
+  camManual(!SETTINGS.zoomOn);   // 开着跟踪球就交还算法；否则固定 1× 居中
+  camApply();
+  updateViewReset();
+  toast('画面已恢复');
 }
 
 /** 横向跟手位移：dxs 是屏幕 px，换算成被 scale 过的内容 px；边缘加阻尼 */
@@ -2993,6 +3115,7 @@ function bindGestures() {
     drag.y = 0; drag.dx = 0; drag.vx = 0; drag.axis = null; drag.mode = null;
     drag.seek = false; drag.seekT = null; drag.seekSeg = null;
     drag.bright0 = SETTINGS.brightness; drag.vol0 = SETTINGS.volume;
+    drag.wasPlaying = false;
     drag.moved = false; drag.t0 = performance.now(); drag.vy = 0;
     if (drag.inFeed) feedEl.style.transition = 'none';
   });
@@ -3017,11 +3140,12 @@ function bindGestures() {
         if (cs && cs.state === 'ready' && cs.idx >= 0 && cs.segs[cs.idx]) {
           drag.axis = 'x';
           drag.seek = true;
+          drag.wasPlaying = cs.playing;   // 拖动期间整体暂停预览（对暂停元素 seek 更稳），松手恢复
+          if (cs.playing) cs.pauseAll();
           drag.seekT = null;
           drag.seekPrevAt = 0;
           drag.seek0 = cs.decks[cs.activeDeck].v.currentTime;
           drag.seekSeg = cs.segs[cs.idx];
-          if (rev.dir < 0) rev.hold = true;     // 倒放中横滑：暂停步进，松手后从新位置继续
           moveSeek(0);
         } else {
           drag.on = false;
@@ -3099,7 +3223,7 @@ function bindGestures() {
     var wasPageDrag = (gesture === 'page');
     var inFeed = drag.inFeed;
     var ptype = drag.ptype;
-    if (drag.seek) { drag.seek = false; hideSeekOsd(); if (rev.dir < 0) rev.hold = false; }
+    if (drag.seek) { cancelSeek(); }
     drag.on = false; drag.mode = null; drag.axis = null;
     gesture = 'none';
     // 触摸的 pointercancel 只是浏览器接管纵向滚动，横向切页仍由 touchmove 继续
@@ -3185,6 +3309,12 @@ function bindCornerCtl() {
   if (br) br.addEventListener('click', function () {
     setPlayDir(-rev.dir);               // 不是开关：按一下把播放方向翻过来
   });
+  var bt = $('#btnTrack');              // 跟踪球：算法自动追球取景（横屏/竖屏都生效）
+  if (bt) bt.addEventListener('click', function () {
+    setAutoFocus(!SETTINGS.zoomOn);
+  });
+  var vr2 = $('#viewReset');            // 恢复画面：回 1× 居中 + 还原画面填充
+  if (vr2) vr2.addEventListener('click', resetView);
   var slows = document.querySelectorAll('#cornerCtl .slow');
   for (var i = 0; i < slows.length; i++) {
     (function (b) {
@@ -3261,7 +3391,9 @@ function slideAdjust(mode, dy) {
   }
 }
 
-/* ---------- 单指横滑快进 / 回退（播放页） ---------- */
+/* ---------- 单指横滑快进 / 回退（播放页） ----------
+   拖动期间整体暂停（对暂停的元素 seek 稳得多，修真机「回退后画面冻住」），
+   预览帧照常跟手；时间变化不弹居中 OSD，直接显示在底部进度条上（圆点 + 气泡）。 */
 var SEEK_SPAN = 90;        // 拖满一屏宽 = ±90 秒
 function moveSeek(dxs) {
   var seg = drag.seekSeg;
@@ -3278,38 +3410,86 @@ function moveSeek(dxs) {
       try { cp.decks[cp.activeDeck].v.currentTime = target; } catch (e) {}
     }
   }
-  showSeekOsd(target - drag.seek0, target);
+  seekBarShow(target);
 }
 function endSeek() {
   var seg = drag.seekSeg, t0 = drag.seek0, t1 = drag.seekT;
+  var wasPlaying = drag.wasPlaying;
+  drag.wasPlaying = false;
   drag.seek = false;
   drag.seekT = null;
   drag.seekSeg = null;
-  hideSeekOsd();
-  if (rev.dir < 0) { rev.last = performance.now(); rev.hold = false; }   // 从新位置恢复倒放步进
+  seekBarHide();
   var c = activeClip();
-  if (!c || c.state !== 'ready' || c.idx < 0 || t1 == null || seg == null) return;
-  if (Math.abs(t1 - t0) < 0.3) return;        // 基本没动：不打断播放
-  var cur = c.decks[c.activeDeck];
-  try { cur.v.currentTime = t1; } catch (e) {}
-  if (c.hasAudio) { try { cur.a.currentTime = t1; } catch (e) {} }
+  if (!c || c.state !== 'ready' || c.idx < 0 || t1 == null || seg == null) {
+    restoreAfterSeek(c, wasPlaying);
+    return;
+  }
+  var moved = Math.abs(t1 - t0) >= 0.3;
+  if (moved) {
+    var cur = c.decks[c.activeDeck];
+    try { cur.v.currentTime = t1; } catch (e) {}
+    if (c.hasAudio) { try { cur.a.currentTime = t1; } catch (e) {} }
+  }
   cam.track = c.tracks[c.idx] || null;
   camCut(t1 - seg.start);
+  restoreAfterSeek(c, wasPlaying);
   showChrome();
 }
-function showSeekOsd(delta, target) {
-  var o = $('#seekOsd');
-  if (!o) return;
-  var b = o.querySelector('b'), sp = o.querySelector('span');
-  var sign = delta >= 0 ? '+' : '-';
-  if (b) b.textContent = sign + Math.abs(delta).toFixed(1) + 's';
-  if (sp) sp.textContent = fmt(Math.max(0, target));
-  o.hidden = false;
-  o.classList.add('on');
+/** 拖动被打断（pointercancel）：停在最后预览位置并恢复播放状态 */
+function cancelSeek() {
+  var t1 = drag.seekT, wasPlaying = drag.wasPlaying;
+  drag.wasPlaying = false;
+  drag.seek = false; drag.seekT = null; drag.seekSeg = null;
+  seekBarHide();
+  var c = activeClip();
+  if (c && c.state === 'ready' && t1 != null && c.idx >= 0) {
+    var cur = c.decks[c.activeDeck];
+    try { cur.v.currentTime = t1; } catch (e) {}
+    if (c.hasAudio) { try { cur.a.currentTime = t1; } catch (e) {} }
+    cam.track = c.tracks[c.idx] || null;
+  }
+  restoreAfterSeek(c, wasPlaying);
 }
-function hideSeekOsd() {
-  var o = $('#seekOsd');
-  if (o) { o.classList.remove('on'); o.hidden = true; }
+/** 拖动结束/取消：恢复拖动前的播放状态（正放 → resumePlay，倒放 → 重启步进循环） */
+function restoreAfterSeek(c, wasPlaying) {
+  if (!wasPlaying || !c || c.state !== 'ready' || c.idx < 0) return;
+  if (rev.dir < 0) {
+    c.playing = true;
+    c.render();
+    rev.last = performance.now();
+    revStartLoop();
+  } else c.resumePlay();
+}
+/** 进度条 seek 指示：强制显示 chrome，进度条放大，圆点 + 气泡（增量/目标时间） */
+function seekBarShow(target) {
+  var c = activeClip();
+  var seg = drag.seekSeg;
+  if (!c || !seg) return;
+  document.body.classList.add('seeking');
+  var p = clamp((target - seg.start) / Math.max(0.1, seg.dur), 0, 1);
+  c.fillEl.style.width = (p * 100).toFixed(2) + '%';
+  if (c.knobEl) {
+    c.knobEl.style.left = (p * 100).toFixed(2) + '%';
+    c.knobEl.style.display = 'block';
+  }
+  if (c.tipEl) {
+    var delta = target - drag.seek0;
+    var sign = delta >= 0 ? '+' : '−';
+    var b = c.tipEl.querySelector('b'), sp = c.tipEl.querySelector('span');
+    if (b) b.textContent = sign + Math.abs(delta).toFixed(1) + 's';
+    if (sp) sp.textContent = fmt(target);
+    c.tipEl.style.left = (clamp(p, 0.1, 0.9) * 100).toFixed(2) + '%';
+    c.tipEl.style.display = 'block';
+  }
+}
+function seekBarHide() {
+  document.body.classList.remove('seeking');
+  var c = activeClip();
+  if (c) {
+    if (c.knobEl) c.knobEl.style.display = 'none';
+    if (c.tipEl) c.tipEl.style.display = 'none';
+  }
 }
 
 /* ---------- 播放方向：正放 ▶ / 倒放 ◀ ----------
@@ -3317,76 +3497,85 @@ function hideSeekOsd() {
    （▶=正放，◀=倒放）。播放键本身仍是播放/暂停，恢复播放时按当前方向走。
    浏览器无法反向解码音频，倒放时静音（暂停音轨），视频逐帧回退 currentTime。
 
-   【调度策略——新旧 WebView 通吃的解码节奏驱动】倒放的每一步都是一次 seek，
-   按 vsync 60Hz 硬赶会形成 seek 风暴 → 掉帧卡顿。这里用「seeked 事件驱动」：
-   上一步 seek 真正解码完成（视频元素发 seeked）才发下一步，解码多快就倒多快，
-   解码慢时自动放慢而不是堆积排队；120ms 超时兜底防个别 ROM 不发事件。
-   配合墙钟 dt，解码快于实时时保持 1× 实时速度；慢动作档直接乘在 dt 上。 */
-var rev = { dir: 1, raf: 0, last: 0, hold: false };   // dir: 1=正放 -1=倒放
+   【倒放引擎 v2 —— 双 deck 乒乓流水，修 S9080「卡顿抖动鬼畜」】
+   单 deck 逐帧回退 = 每步「seek → 解码 → 显示」串行，seek 延迟的抖动直接变成
+   节奏忽快忽慢（鬼畜）。v2 让两个 deck 同源交替：
+     显示 deck 停在第 N 帧时，备用 deck 已经在 seek 第 N-1 步的位置；
+   备用 seeked 一到 → 硬切显示备用，原显示 deck 转身去 seek 更前一步。
+   显示端永远有一帧现成画面，seek 延迟被流水线吃掉，步距均匀不抖。
+   步长自适应：实测 seek 延迟 EMA × 目标速率（慢动作档）= 每步回退秒数，
+   钳制在 [1/60, 1/12] 秒——快机子步距细更顺滑，慢机子保速度不跳帧过头。 */
+var rev = { dir: 1, on: false, last: 0, step: 0.08, lat: 80 };   // dir: 1=正放 -1=倒放
 
-/** 倒放步进循环：dir=-1 时跑；raf 字段仅作「循环活着」标志（rAF 句柄不再使用） */
 function revStartLoop() {
-  if (rev.raf) return;
-  rev.raf = 1;
+  if (rev.on) return;
+  rev.on = true;
   rev.last = performance.now();
-  revKick();
+  rev.lat = 80;
+  rev.step = 0.08;
+  revStep();
 }
-function revStopLoop() {
-  rev.raf = 0;
+function revStopLoop() { rev.on = false; }
+
+/** 备用 deck 同源化：倒放全程用同一个媒体 URL（整段视频本就一个 src），
+ *  通常只需把 seg 标签改到当前段并保持暂停；源不一致时重设 src。 */
+function revPrimeStandby(c) {
+  var nxt = c.decks[1 - c.activeDeck];
+  var url = '/api/media/' + c.token + '/v?i=0';
+  if (!(nxt.seg === c.idx && nxt.v.dataset.src === url && nxt.everReady)) {
+    setSrc(nxt.v, url);
+    nxt.everReady = true;
+  }
+  nxt.seg = c.idx;
+  nxt.rolling = false;
+  try { nxt.v.pause(); } catch (e) {}
+  return nxt;
 }
+
+/** 乒乓步进：在备用 deck 上 seek 到下一帧位 → seeked 到达即硬切显示 →
+ *  原显示 deck 退位，成为下一步的 seek 工人。循环由自身尾部驱动。 */
+async function revStep() {
+  if (!rev.on || rev.dir >= 0) { rev.on = false; return; }
+  var c = activeClip();
+  if (!c || c.state !== 'ready' || c.idx < 0) { rev.on = false; return; }
+  if (!c.playing) { setTimeout(revStep, 100); return; }   // 暂停中待命，恢复后继续
+  var seg = c.segs[c.idx];
+  if (!seg) { revReset(); return; }
+  var end = seg.start + seg.dur;
+  var idx0 = c.idx;
+  var cur = c.decks[c.activeDeck];
+  var nxt = revPrimeStandby(c);
+  var tNext = cur.v.currentTime - rev.step;
+  if (tNext <= seg.start + 0.05) tNext = end - 0.1;       // 段首回绕到段尾
+  var st = performance.now();
+  await seekTo(nxt.v, tNext, 600);
+  if (!rev.on || rev.dir >= 0) return;                     // 中途换向/停止
+  if (c.idx !== idx0 || c.segs[c.idx] !== seg) return;     // 中途切段/序列重建
+  var lat = performance.now() - st;
+  if (lat < 10) await new Promise(function (r) { requestAnimationFrame(r); });   // 同帧秒回：让出一帧再切
+  if (!rev.on || rev.dir >= 0 || c.idx !== idx0) return;
+  rev.lat = rev.lat * 0.7 + Math.min(600, lat) * 0.3;
+  var rate = slowBase();
+  rev.step = clamp(rev.lat / 1000 * rate, 1 / 60, Math.max(1 / 24, rate / 12));
+  // 硬切显示备用 deck（seeked 帧已就绪），原显示 deck 退位当下一步的 seek 工人
+  c.showDeck(1 - c.activeDeck, true);
+  try { cur.v.pause(); } catch (e) {}
+  try { nxt.v.pause(); } catch (e) {}    // 停帧显示：暂停的元素同样渲染 seeked 帧
+  nxt.rolling = false;
+  c.hud(nxt.v.currentTime, end);
+  rev.last = performance.now();
+  revStep();
+}
+
 /** 回到正向（切段 / 换场 / 停止时用）：停循环 + 复位方向与图标 */
 function revReset() {
   revStopLoop();
-  rev.hold = false;
   if (rev.dir !== 1) {
     rev.dir = 1;
     var b = $('#btnRev');
     if (b) b.classList.remove('on');
     syncPlayIcon();
   }
-}
-
-/** 等上一步 seek 完成（seeked）→ 执行下一步；seeked 不来就 120ms 超时兜底 */
-function revKick() {
-  if (!rev.raf || rev.dir >= 0) { rev.raf = 0; return; }
-  var c = activeClip();
-  var v = (c && c.decks[c.activeDeck]) ? c.decks[c.activeDeck].v : null;
-  if (!v) { rev.raf = 0; return; }
-  var done = false;
-  var step = function () {
-    if (done) return;
-    done = true;
-    if (!rev.raf || rev.dir >= 0) { rev.raf = 0; return; }
-    var c2 = activeClip();
-    if (!c2 || c2.state !== 'ready' || c2.idx < 0) { rev.raf = 0; return; }
-    if (!c2.playing) { setTimeout(revKick, 100); return; }   // 暂停中待命，恢复后继续
-    var now = performance.now();
-    if (!rev.hold) {
-      var dt = Math.min(0.25, (now - rev.last) / 1000);
-      rev.last = now;
-      revApply(c2, dt);
-    } else rev.last = now;
-    setTimeout(revKick, 0);
-  };
-  var to = setTimeout(step, 120);
-  v.addEventListener('seeked', function onSeeked() {
-    v.removeEventListener('seeked', onSeeked);
-    clearTimeout(to);
-    step();
-  });
-}
-
-/** 执行一次回退：dt 秒 × 慢动作档；段首回绕到段尾 */
-function revApply(c, dt) {
-  var cur = c.decks[c.activeDeck];
-  var seg = c.segs[c.idx];
-  if (!seg) { revReset(); return; }
-  var end = seg.start + seg.dur;
-  var t = cur.v.currentTime - slowBase() * dt;
-  if (t <= seg.start + 0.05) t = end - 0.1;
-  try { cur.v.currentTime = t; } catch (e) {}
-  if (c.hasAudio) { try { cur.a.currentTime = t; } catch (e) {} }
-  c.hud(t, end);
 }
 
 /** 切换播放方向。播放中立即生效；暂停中只换方向，下次按播放键按新方向走 */
@@ -3600,6 +3789,8 @@ function syncSettingsUI() {
 function syncZoomIcons() {
   var els = document.querySelectorAll('.ic.zoom');
   for (var i = 0; i < els.length; i++) els[i].classList.toggle('on', SETTINGS.zoomOn);
+  var bt = $('#btnTrack');
+  if (bt) bt.classList.toggle('on', SETTINGS.zoomOn);
 }
 
 /** 自动跟焦总开关：关＝自定义固定缩放（倍率/中心都听用户的，完全不跟踪） */
@@ -3613,7 +3804,7 @@ function setAutoFocus(on) {
   camApply();
   var c = activeClip();
   if (c) algoDraw(c);   // 关：清空标注；开：下一帧采样即绘制
-  toast(SETTINGS.zoomOn ? '自动跟焦开 · 算法构图' : '自动跟焦关 · 自定义缩放不跟踪');
+  toast(SETTINGS.zoomOn ? '跟踪球开 · 算法自动追球取景' : '跟踪球关 · 固定取景');
   showChrome();
 }
 function toggleZoom() { setAutoFocus(!SETTINGS.zoomOn); }

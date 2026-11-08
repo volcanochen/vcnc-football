@@ -1096,7 +1096,16 @@ ClipPlayer.prototype.prepareNext = function () {
 
 ClipPlayer.prototype.jumpTo = async function (i, opts) {
   opts = opts || {};
-  if (this.busy || i < 0 || i >= this.segs.length || !this.token) return;
+  // busy 中不静默丢弃用户点击：排队最后一个，切段完成后补跳（flushQueuedJump）。
+  // 内部自动推进（无 user 标记）不排队——进行中的切段优先。
+  if (this.busy) {
+    if (opts.user && i >= 0 && i < this.segs.length && this.token) {
+      this.queuedJump = { i: i, opts: opts };
+      diag('jump queued i=' + (i + 1) + '/' + this.segs.length);
+    }
+    return;
+  }
+  if (i < 0 || i >= this.segs.length || !this.token) return;
   revReset();                           // 切段回正向，避免跟双 deck 硬切打架
   var self = this;
 
@@ -1138,6 +1147,10 @@ ClipPlayer.prototype.jumpTo = async function (i, opts) {
     cam.track = this.tracks[i] || null;
     camCut(opts.seekOffset && opts.seekOffset > 0.05 ? opts.seekOffset : 0);
     this.prepareNext();
+    // 补跳必须放在 prepareNext 之后：补跳的慢路径会先 await this.preparing
+    // 串行接管同一备用 deck；若先 flush，补跳的 prepare 与这里的 prepareNext
+    // 会在同一 deck 上竞速（两路 seek 互踩，seg 标签错乱 → idx 与实际内容脱节）
+    this.flushQueuedJump();
     diag('cut fast idx=' + i + '/' + this.segs.length);
     return;
     }
@@ -1172,6 +1185,7 @@ ClipPlayer.prototype.jumpTo = async function (i, opts) {
     this.error = '准备第 ' + (i + 1) + ' 段失败（网络或接口异常），请重试';
     this.playing = false;
     this.busy = false;
+    this.flushQueuedJump();
     this.render();
     return;
   }
@@ -1202,6 +1216,8 @@ ClipPlayer.prototype.jumpTo = async function (i, opts) {
   cam.track = track || null;
   camCut(opts.seekOffset && opts.seekOffset > 0.05 ? opts.seekOffset : 0);
   this.prepareNext();
+  // flush 在 prepareNext 之后（同上：补跳会 await this.preparing 串行接管 deck）
+  this.flushQueuedJump();
   diag('cut slow idx=' + i + '/' + this.segs.length);
 };
 
@@ -1239,6 +1255,7 @@ ClipPlayer.prototype.stopAll = function () {
   this.playing = false;
   this.idx = -1;
   this.pendingIdx = -1;
+  this.queuedJump = null;   // 序列重建/换场：排队中的用户点击一并作废
   this.gen++;
   revReset();
   for (var i = 0; i < this.decks.length; i++) {
@@ -3070,6 +3087,45 @@ function syncSegFloatActive() {
   }
 }
 
+/** 用户点浮窗行跳段（唯一入口）：
+ *  - busy 中不丢弃，排队最后一个点击，切段完成后补跳（此前静默 return，
+ *    用户感受「点了没反应」，随后段末自动推进播下一段 = 「点 A 播 A+1」）
+ *  - 点当前段行 = 回到段头重播（此前也是 no-op，同样被误读成「播了下一段」） */
+ClipPlayer.prototype.userJump = function (i) {
+  if (i < 0 || i >= this.segs.length) return;
+  if (this.busy) {
+    this.queuedJump = { i: i, opts: { user: true } };
+    diag('jump queued i=' + (i + 1) + '/' + this.segs.length);
+    return;
+  }
+  if (i === this.idx) { this.replayCurrent(); return; }
+  this.jumpTo(i, { user: true });
+};
+
+/** 点当前段行：回到段头重播 */
+ClipPlayer.prototype.replayCurrent = function () {
+  if (this.busy || this.idx < 0 || !this.segs[this.idx]) return;
+  var seg = this.segs[this.idx];
+  var cur = this.decks[this.activeDeck];
+  revReset();
+  this.lastSwitchAt = performance.now();
+  try { cur.v.currentTime = seg.start; } catch (e) {}
+  if (this.hasAudio) { try { cur.a.currentTime = seg.start; } catch (e) {} }
+  cam.track = this.tracks[this.idx] || null;
+  camCut(0);
+  this.resumePlay();
+  this.prepareNext();
+  diag('replay current idx=' + (this.idx + 1) + '/' + this.segs.length);
+};
+
+/** jumpTo 收尾统一补跳排队的用户点击 */
+ClipPlayer.prototype.flushQueuedJump = function () {
+  var q = this.queuedJump;
+  if (!q) return;
+  this.queuedJump = null;
+  if (q.i !== this.idx) this.jumpTo(q.i, q.opts);
+};
+
 /** 锁定/解锁某一段；锁定时若不在该段就先跳过去 */
 function setLoopSeg(i, on) {
   var c = activeClip();
@@ -3078,7 +3134,7 @@ function setLoopSeg(i, on) {
   loopIdx = i;
   loopBvid = c.item.bvid;
   diag('loop seg ' + (i + 1) + '/' + c.segs.length);
-  if (c.idx !== i) c.jumpTo(i);
+  if (c.idx !== i) c.userJump(i);
   else c.prepareNext();     // 就地锁定：立刻把备用 deck 备到段首
   toast('单段循环 · 第 ' + (i + 1) + ' 段');
   syncSegFloatActive();
@@ -3109,7 +3165,7 @@ function bindSegFloat() {
       if (!row) return;
       var j = +row.getAttribute('data-i');
       if (loopIdx >= 0 && j !== loopIdx) clearLoop(false);
-      if (j !== c.idx) c.jumpTo(j);
+      c.userJump(j);
       showChrome();
     });
   }

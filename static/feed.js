@@ -320,8 +320,8 @@ var CLIP_HTML =
     '</div>' +
     '<div class="veil"><div class="veil-spin"></div><div class="veil-text"></div><button class="veil-retry" type="button" hidden>重试</button></div>' +
     '<div class="chrome">' +
+      '<div class="chinfo"><div class="ctitle"></div><div class="csub"></div></div>' +
       '<div class="ch-top">' +
-        '<div class="brand">VCNC · 足球沉浸场</div>' +
         '<div class="ch-actions">' +
           '<button class="ic list" type="button" title="比赛列表">' + ICON_LIST + '</button>' +
           '<button class="ic zoom" type="button" title="焦点缩放">' + ICON_ZOOM + '</button>' +
@@ -329,8 +329,6 @@ var CLIP_HTML =
         '</div>' +
       '</div>' +
       '<div class="ch-bottom">' +
-        '<div class="ctitle"></div>' +
-        '<div class="csub"></div>' +
         '<div class="bar"><div class="bar-fill"></div><div class="bar-knob"></div><div class="bar-tip"><b></b><span></span></div></div>' +
       '</div>' +
     '</div>' +

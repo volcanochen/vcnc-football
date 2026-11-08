@@ -263,7 +263,14 @@ body.chrome-off #segFloat { opacity: 0; pointer-events: none; }
   padding: 10px 12px;
   background: linear-gradient(rgba(0, 0, 0, .38), rgba(0, 0, 0, 0));
 }
-.brand { font-size: 11px; color: rgba(255, 255, 255, .62); letter-spacing: 1.5px; }
+/* 标题/副标题：屏幕顶部左侧（原在底部进度条上方，2026-11-09 按反馈上移）。
+   独立于 .ch-top（播放页整个顶栏被隐藏），避开右上角 #pageNav 按钮区 */
+.chinfo {
+  position: absolute;
+  top: 12px; left: 14px; right: 170px;
+  z-index: 40;
+  pointer-events: none;   /* 不挡顶部手势 */
+}
 .ch-actions { margin-left: auto; display: flex; }
 .ic {
   width: 34px; height: 34px;
@@ -291,7 +298,7 @@ body.chrome-off #segFloat { opacity: 0; pointer-events: none; }
   background: rgba(255, 255, 255, .16);
   border-radius: 2px;
   overflow: hidden;
-  margin-top: 8px;   /* bar 在文字下方：与 ctitle/csub 留间距，整体贴底 */
+  /* 文字已上移到顶部，bar 独占底部贴底 */
 }
 .bar-fill { height: 100%; width: 0; background: #00aeec; }
 .ctitle {
@@ -301,8 +308,9 @@ body.chrome-off #segFloat { opacity: 0; pointer-events: none; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .75);
 }
-.csub { margin-top: 3px; font-size: 11px; color: rgba(255, 255, 255, .62); }
+.csub { margin-top: 3px; font-size: 11px; color: rgba(255, 255, 255, .62); text-shadow: 0 1px 3px rgba(0, 0, 0, .75); }
 
 /* ---------- 中央播放/暂停 ---------- */
 .bigplay {
@@ -877,7 +885,7 @@ body.segfloat-off .segfloat { display: none !important; }
 #cornerCtl {
   position: absolute;
   left: 12px;
-  bottom: 64px;   /* 抬到进度栏之上，避免遮挡 */
+  bottom: 18px;   /* 文字上移后贴底：只留出细进度条的位置 */
   display: flex;
   align-items: center;
   z-index: 45;

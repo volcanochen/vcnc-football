@@ -4556,11 +4556,42 @@ function setPlayDir(d) {
    chrome / toast / hint
    ============================================================= */
 var chromeTimer = null;
+/* chrome/segFloat 上按住未松的指针数：操作中（拖进度条/按住按钮/滚动列表）绝不隐藏 */
+var chromeHold = 0;
+function hideChromeIdle() {
+  if (chromeHold > 0) { chromeTimer = setTimeout(hideChromeIdle, 1000); return; }
+  document.body.classList.add('chrome-off');
+}
 function showChrome() {
   document.body.classList.remove('chrome-off');
   clearTimeout(chromeTimer);
-  chromeTimer = setTimeout(function () { document.body.classList.add('chrome-off'); }, 3000);
+  chromeTimer = setTimeout(hideChromeIdle, 3000);
 }
+/* 可见态下的持续操作刷新计时：滚动列表/拖进度条/移动手指都不会中途隐藏；
+   隐藏态的触碰不刷新（由 onTap showChrome 唤回） */
+function keepChrome() {
+  if (document.body.classList.contains('chrome-off')) return;
+  clearTimeout(chromeTimer);
+  chromeTimer = setTimeout(hideChromeIdle, 3000);
+}
+(function bindChromeKeepAlive() {
+  function inChrome(t) { return !!(t && t.closest && (t.closest('.chrome') || t.closest('#segFloat'))); }
+  document.addEventListener('pointerdown', function (e) {
+    if (!inChrome(e.target)) return;
+    chromeHold++;
+    keepChrome();
+  }, true);
+  ['pointerup', 'pointercancel'].forEach(function (t) {
+    document.addEventListener(t, function () {
+      if (chromeHold > 0) chromeHold--;
+    }, true);
+  });
+  ['pointermove', 'touchmove', 'wheel'].forEach(function (t) {
+    document.addEventListener(t, function (e) {
+      if (inChrome(e.target)) keepChrome();
+    }, { capture: true, passive: true });
+  });
+})();
 
 var toastTimer = null;
 function toast(msg) {

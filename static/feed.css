@@ -479,6 +479,7 @@ body.chrome-off .chrome { opacity: 0; }
   overflow: hidden;
   flex: none;
 }
+.stepper.dim { opacity: .45; }   /* 自动补时接管时提示手动值未生效 */
 .stp {
   border: none;
   background: transparent;

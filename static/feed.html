@@ -108,7 +108,11 @@
           <div class="cat-count" id="catCount">尚未载入比赛</div>
         </div>
 
-        <!-- 时间戳前后补时：应对置顶评论时间不准、片段漏内容 -->
+        <!-- 时间戳前后补时：默认自动（配合时间码对齐），步进器手动调整即接管 -->
+        <div class="set-row">
+          <span class="lab">自动补时</span>
+          <button class="sw on" id="padAutoSw" role="switch" aria-label="自动补时"></button>
+        </div>
         <div class="set-row">
           <span class="lab">前置补时</span>
           <div class="stepper" id="padFrontStep">

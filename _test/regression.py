@@ -459,6 +459,113 @@ def t_settings_migrate(s, ctx):
     return ok, json.dumps(r, ensure_ascii=False)
 
 
+@case("calib-math", "时间对齐数学：toStream/toOrig 往返、片段映射到流时间轴、还原现场")
+def t_calib_math(s, ctx):
+    r = jev(s, """
+    (function(){
+      var bak = { ok: calib.ok, a: calib.a, b: calib.b };
+      calib.ok = true; calib.a = -0.404; calib.b = 0.999068;   // 本场实测模型
+      var out = {};
+      out.roundTrip = Math.abs(toOrig(toStream(3869)) - 3869) < 1e-6;
+      out.toStreamVal = +toStream(3869).toFixed(3);            // (3869+0.404)/0.999068 ≈ 3873.01
+      // 片段映射：最早一条 seg.start ≈ toStream(评论时间) - padF
+      var c = activeClip();
+      if (c && c.info && c.segs.length && c.info.matched && c.info.matched.length) {
+        var t0 = null;
+        for (var i = 0; i < c.info.matched.length; i++) {      // matched 未排序，取最早时间
+          var s0 = toSec(c.info.matched[i].time || '');
+          if (s0 != null && (t0 == null || s0 < t0)) t0 = s0;
+        }
+        if (t0 != null) {
+          out.seg0Consistent = Math.abs(c.segs[0].start - (toStream(t0) - effPadFront())) < 0.5;
+          out.origKept = c.segs[0].orig === t0;
+        }
+      }
+      calib.ok = bak.ok; calib.a = bak.a; calib.b = bak.b;      // 还原现场
+      return JSON.stringify(out);
+    })()
+    """)
+    ok = (r.get("roundTrip") is True and r.get("origKept") is True
+          and abs(r.get("toStreamVal", 0) - 3873.015) < 0.01)
+    if r.get("seg0Consistent") is False:
+        ok = False
+    return ok, json.dumps(r, ensure_ascii=False)
+
+
+@case("pad-auto", "自动补时：默认开启、有效值随校准状态取值、用户手动调整即接管")
+def t_pad_auto(s, ctx):
+    r = jev(s, """
+    (function(){
+      var out = {};
+      var cbak = { ok: calib.ok, a: calib.a, b: calib.b, done: calib.done, running: calib.running };
+      out.defaultOn = SETTINGS.padAuto === true;
+      out.effFront = effPadFront(); out.effBack = effPadBack();
+      out.effFrontNoCalib = (calib.ok = false, effPadFront());
+      calib.ok = true;                                       // 假设校准成功
+      out.effFrontCalib = effPadFront();
+      calib.ok = false;
+      // 手动步进接管：点击「前置 +」应关闭自动
+      var saved = { f: SETTINGS.padFront, b: SETTINGS.padBack, auto: SETTINGS.padAuto };
+      var btn = document.querySelector('#padFrontStep .stp[data-step="0.5"]');
+      if (btn) btn.click();
+      out.autoOffAfterManual = SETTINGS.padAuto === false;
+      SETTINGS.padFront = saved.f; SETTINGS.padBack = saved.b; SETTINGS.padAuto = saved.auto;
+      saveSettings(); syncPadValues();
+      calib.ok = cbak.ok; calib.a = cbak.a; calib.b = cbak.b;
+      calib.done = cbak.done; calib.running = cbak.running;   // 恢复现场，避免污染后续用例
+      return JSON.stringify(out);
+    })()
+    """)
+    efnc, efc = r.get("effFrontNoCalib"), r.get("effFrontCalib")
+    ok = (r.get("defaultOn") is True and r.get("autoOffAfterManual") is True
+          and isinstance(efnc, (int, float)) and isinstance(efc, (int, float))
+          and efnc > efc)      # 未校准补时更大（与运行时初始校准状态无关）
+    return ok, json.dumps(r, ensure_ascii=False)
+
+
+@case("calib-live", "时间码自动校准：开场后台 OCR 拟合成功（或命中缓存），片段落流时间轴，浮窗显示原始时间")
+def t_calib_live(s, ctx):
+    # 最多等 150s：校准在开场后台跑 3 次远程 seek + OCR
+    deadline = time.time() + 150
+    last = {}
+    while time.time() < deadline:
+        last = jev(s, """
+        (function(){
+          var c = activeClip();
+          return JSON.stringify({
+            done: calib.done, ok: calib.ok, a: calib.a, b: calib.b,
+            dur: c ? c.videoDuration : 0,
+            segs: c && c.segs ? c.segs.length : 0,
+            firstOrig: c && c.segs[0] ? (c.segs[0].orig != null) : null
+          });
+        })()
+        """)
+        if last.get("ok") is True:
+            break
+        time.sleep(5)
+    if last.get("ok") is not True:
+        return False, "calib not ok: %s" % json.dumps(last, ensure_ascii=False)
+    ok = (0.98 <= last.get("b", 0) <= 1.02 and abs(last.get("a", 999)) <= 90
+          and last.get("done") in ("ok", "cached", "cached-global"))
+    # 浮窗行显示原始时间（orig 存在且行文本 = fmt(orig)）
+    r2 = jev(s, """
+    (function(){
+      var c = activeClip();
+      if (!c || !c.segs.length) return JSON.stringify({err: 'no segs'});
+      var row = document.querySelector('.sf-row .sf-t');
+      return JSON.stringify({
+        firstStart: +c.segs[0].start.toFixed(2),
+        firstOrig: c.segs[0].orig,
+        rowText: row ? row.textContent : null,
+        rowMatchesOrig: row && c.segs[0].orig != null ? row.textContent === fmt(c.segs[0].orig) : null
+      });
+    })()
+    """)
+    if r2.get("rowMatchesOrig") is False:
+        ok = False
+    return ok, json.dumps({"calib": last, "display": r2}, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------- 主流程
 
 def main():

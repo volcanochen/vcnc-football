@@ -166,7 +166,7 @@ var LOW_DECK_MODE = (function () {
    segFloat：播放页左侧集锦浮窗是否显示
    cacheMb：本地视频缓存上限（MB），真实额度由 /api/cache/config 下发给本地代理 */
 var SETTINGS = {
-  mode: 'hl', cat: '', padFront: 1, padBack: 2,
+  mode: 'hl', cat: '', padFront: 1, padBack: 2, padAuto: true,
   zoom: 1, zoomOn: false, split: true, focusBox: false,
   algoViz: true, brightness: 1, volume: 1, slowRate: 1,
   fit: 'contain', segFloat: true, cacheMb: 600
@@ -233,6 +233,7 @@ function loadSettings() {
       // 真正的内容偏好（补时、画面填充方式、分屏、浮窗等）仍持久化。
       if (typeof o.padFront === 'number') SETTINGS.padFront = normPad(o.padFront, 1);
       if (typeof o.padBack === 'number') SETTINGS.padBack = normPad(o.padBack, 2);
+      if (typeof o.padAuto === 'boolean') SETTINGS.padAuto = o.padAuto;
       if (typeof o.split === 'boolean') SETTINGS.split = o.split;
       if (typeof o.focusBox === 'boolean') SETTINGS.focusBox = o.focusBox;
       if (typeof o.algoViz === 'boolean') SETTINGS.algoViz = o.algoViz;
@@ -477,8 +478,10 @@ ClipPlayer.prototype.resolve = async function () {
     this.info = j;
     this.videoDuration = j.duration || 0;
     this.hasAudio = !!(j.audio && j.audio.id);
+    calibLoad(this.item.bvid);          // 有缓存的对齐立即生效于片段映射
     this.buildSegs(j.matched || []);
     this.state = 'ready';
+    scheduleCalib(this);                // 无缓存则稍后后台自动校准
     this.error = '';
     if (page === 2) { renderCatTokens(); updateCatCount(); }   // 设置页开着时刷新候选/命中数
     renderSegFloat(true);
@@ -495,6 +498,276 @@ ClipPlayer.prototype.resolve = async function () {
   }
 };
 
+/* ---------- 时间基准自动对齐：原始录像（画面烧录时间码）↔ B 站转码流 ----------
+   VCNC 源的 B 站转码流时间轴与画面烧录的时间码存在线性漂移（实测约 -0.093% +
+   起点偏移，1 小时累计 ~3.4s），置顶评论的时间戳按烧录钟记，直接拿去 seek 会越
+   到后面偏得越多。开场后用独立隐藏 video 在 3 个已知流时间点抓帧、读烧录码，
+   最小二乘拟合「烧录 = a + b × 流时间」，此后评论跳转/时间显示全部过映射；
+   读码失败或短视频（漂移可被补时覆盖）自动退回「加大自动补时」策略。
+   全程无用户配置；校准结果按 bvid 持久化，只算一次。 */
+var CALIB_TPL_RAW=[[-7,-7,-1,10,13,12,2,-7,-7,-7,-7,-7,-7,9,11,12,13,13,12,11,-6,-7,-7,-7,6,12,13,-2,-4,-4,12,13,10,-7,-7,-7,12,13,-3,-6,-7,-7,-3,13,13,-3,-7,-7,13,10,-7,-7,-7,-7,-7,3,13,6,-7,-7,13,3,-7,-7,-7,-7,-7,-5,13,11,-7,-7,13,-3,-7,-7,-7,-7,-7,-7,13,13,-7,-7,13,-5,-7,-7,-7,-7,-7,-7,13,13,-7,-7,13,-6,-7,-7,-7,-7,-7,-7,13,13,-7,-7,13,-6,-7,-7,-7,-7,-7,-7,13,13,-7,-7,13,-6,-7,-7,-7,-7,-7,-7,13,13,-7,-7,13,-4,-7,-7,-7,-7,-7,-7,13,13,-7,-7,13,0,-7,-7,-7,-7,-7,-6,13,12,-7,-7,13,6,-7,-7,-7,-7,-7,-2,13,9,-7,-7,13,13,-4,-7,-7,-7,-6,8,13,3,-7,-7,10,13,7,-4,-5,-4,0,13,11,-7,-7,-7,-4,11,13,13,9,13,13,12,0,-7,-7,-7,-7,-4,13,13,13,13,13,0,-7,-7,-7,-7],[-5,-5,-5,-5,-5,8,15,-5,-5,-5,-5,-5,-5,-5,-5,-5,1,16,17,-5,-5,-5,-5,-5,-5,-5,-5,1,15,17,17,-5,-5,-5,-5,-5,-5,-5,8,14,17,17,17,-5,-5,-5,-5,-5,-4,12,16,17,13,17,17,-5,-5,-5,-5,-5,2,17,16,2,1,17,17,-5,-5,-5,-5,-5,-2,4,2,-5,-3,17,17,-5,-5,-5,-5,-5,-5,-4,-5,-5,-3,17,17,-5,-5,-5,-5,-5,-5,-5,-5,-5,-3,17,17,-5,-5,-5,-5,-5,-5,-5,-5,-5,-3,17,17,-5,-5,-5,-5,-5,-5,-5,-5,-5,-3,17,17,-5,-5,-5,-5,-5,-5,-5,-5,-5,-3,17,17,-5,-5,-5,-5,-5,-5,-5,-5,-5,-3,17,17,-5,-5,-5,-5,-5,-5,-5,-5,-5,-3,17,17,-5,-5,-5,-5,-5,-5,-5,-5,-5,-2,17,17,-5,-5,-5,-5,-5,-5,-5,-5,-5,-2,17,17,-5,-5,-5,-5,-5,-5,-5,-5,-5,-2,17,17,-5,-5,-5,-5,-5,-5,-5,-5,-5,-1,17,17,-5,-5,-5,-5,-5],[-7,-7,3,13,13,12,5,-7,-7,-7,-7,-7,-3,11,12,13,13,13,12,11,-2,-7,-7,-7,11,13,13,-1,-4,-3,8,13,11,-5,-7,-7,13,13,-3,-6,-7,-7,-4,6,13,8,-7,-7,13,4,-7,-7,-7,-7,-7,-4,13,12,-7,-7,7,-5,-7,-7,-7,-7,-7,-6,13,13,-7,-7,-3,-7,-7,-7,-7,-7,-7,3,13,8,-7,-7,-7,-7,-7,-7,-7,-7,-5,11,13,-2,-7,-7,-7,-7,-7,-7,-7,-6,5,13,6,-7,-7,-7,-7,-7,-7,-7,-6,4,13,9,-3,-7,-7,-7,-7,-7,-7,-3,3,13,8,-1,-7,-7,-7,-7,-7,-7,0,7,13,7,-2,-7,-7,-7,-7,-6,-7,-1,12,13,7,-4,-7,-7,-7,-7,-7,-4,-2,13,13,8,-7,-7,-7,-7,-7,-7,-7,-5,13,13,10,-7,-7,-7,-7,-7,-7,-7,-7,-7,13,13,-2,-4,-4,-4,-4,-4,-4,-4,-7,-7,13,13,13,13,13,13,13,13,13,13,-7,-7,13,13,13,13,13,13,13,13,13,13,-7,-7],[-7,-5,6,13,13,8,-3,-7,-7,-7,-7,-7,-6,12,13,13,13,13,12,12,-7,-7,-7,-7,11,13,13,-4,-4,-1,13,13,6,-7,-7,-7,13,13,-3,-7,-7,-6,-3,13,12,-7,-7,-7,13,6,-7,-7,-7,-7,-7,13,13,-7,-7,-7,-1,-4,-7,-7,-7,-7,-7,13,13,-7,-7,-7,-7,-7,-7,-7,-7,-7,2,13,10,-7,-7,-7,-7,-7,-7,-4,4,5,11,10,-1,-7,-7,-7,-7,-7,-7,5,12,13,13,11,-7,-7,-7,-7,-7,-7,-7,2,4,4,8,13,3,-7,-7,-7,-7,-7,-7,-7,-7,-7,-2,8,13,1,-7,-7,-7,-7,-7,-7,-7,-7,-7,-2,13,13,-7,-7,-1,-6,-7,-7,-7,-7,-7,-7,13,13,-7,-7,13,1,-7,-7,-7,-7,-7,-5,13,13,-7,-7,13,11,-6,-7,-7,-7,-6,4,13,10,-7,-7,12,13,3,-4,-5,-4,-1,13,13,-2,-7,-7,5,12,13,13,9,13,13,12,9,-7,-7,-7,-7,2,13,13,13,13,13,1,-7,-7,-7,-7],[-7,-7,-7,-7,-7,-7,10,11,-7,-7,-7,-7,-7,-7,-7,-7,-7,8,13,13,-5,-7,-7,-7,-7,-7,-7,-7,-1,13,13,13,-5,-7,-7,-7,-7,-7,-7,-7,11,13,13,13,-6,-7,-7,-7,-7,-7,-7,7,13,6,13,13,-6,-7,-7,-7,-7,-7,2,13,4,-4,13,13,-6,-7,-7,-7,-7,-4,11,12,-4,-7,13,13,-6,-7,-7,-7,-7,7,13,1,-7,-7,13,13,-6,-7,-7,-7,2,13,4,-7,-7,-7,13,13,-6,-7,-7,-7,12,9,-6,-7,-7,-7,13,13,-6,-7,-7,-7,13,0,-7,-7,-7,-5,13,13,-6,-7,-7,-7,13,1,1,1,1,3,13,13,1,1,-5,-7,13,13,13,13,13,13,13,13,13,13,-3,-7,8,8,9,8,8,9,13,13,9,9,-4,-7,-7,-6,-6,-7,-7,-3,13,13,-5,-6,-7,-7,-7,-7,-7,-7,-7,-7,13,13,-6,-7,-7,-7,-7,-7,-7,-7,-7,-6,13,13,-7,-7,-7,-7,-7,-7,-7,-7,-7,-6,13,13,-7,-7,-7,-7],[-8,10,12,12,12,12,12,11,12,-4,-8,-8,-6,12,12,12,12,12,12,12,12,3,-8,-8,-1,12,12,4,4,4,4,4,4,-6,-8,-8,4,12,4,-6,-6,-6,-6,-6,-6,-8,-8,-8,9,12,-4,-8,-8,-8,-8,-8,-8,-8,-8,-8,12,12,-7,-8,-5,-5,-8,-8,-8,-8,-8,-8,12,12,4,5,7,6,5,4,-8,-8,-8,-8,12,12,12,7,3,5,12,11,4,-8,-8,-8,12,12,1,-3,-6,-4,1,12,12,-1,-8,-8,3,3,-8,-8,-8,-8,-8,2,12,9,-8,-8,-8,-8,-8,-8,-8,-8,-8,-8,12,12,-7,-8,-8,-8,-8,-8,-8,-8,-8,-8,12,12,-7,-8,-2,-8,-8,-8,-8,-8,-8,-8,12,12,-7,-8,12,-3,-8,-8,-8,-8,-8,-6,12,12,-7,-8,12,9,-7,-8,-8,-8,-8,2,12,9,-8,-8,11,12,0,-5,-6,-5,-3,12,11,-3,-8,-8,5,11,12,12,9,12,12,11,4,-8,-8,-8,-8,2,12,12,12,12,12,0,-8,-8,-8,-8],[-8,-8,-8,2,11,12,8,-3,-8,-8,-8,-8,-8,-6,10,11,12,12,11,10,8,-8,-8,-8,-8,9,12,7,-5,-5,0,12,11,1,-8,-8,8,12,1,-5,-8,-8,-7,2,12,10,-8,-8,12,12,-6,-8,-8,-8,-8,-6,11,10,-8,-8,12,5,-8,-8,-8,-8,-8,-8,-2,-3,-8,-8,12,-3,-8,-1,5,5,5,-2,-8,-8,-8,-8,12,-5,3,8,12,12,12,8,3,-8,-8,-8,12,4,12,1,1,1,2,12,12,-1,-8,-8,12,12,2,-8,-8,-8,-7,2,12,9,-8,-8,12,10,-8,-8,-8,-8,-8,-8,12,12,-7,-8,12,6,-8,-8,-8,-8,-8,-8,11,12,-4,-8,12,3,-8,-8,-8,-8,-8,-8,10,12,0,-8,12,8,-8,-8,-8,-8,-8,-8,12,12,-3,-8,11,12,-4,-8,-8,-8,-8,-4,12,12,-8,-8,5,12,12,-5,-6,-6,-5,11,12,9,-8,-8,-8,10,11,12,8,10,12,12,10,-8,-8,-8,-8,-8,2,12,12,12,12,11,-8,-8,-8,-8],[15,15,15,15,14,15,15,15,15,15,-2,-6,15,15,15,15,15,15,15,15,15,15,2,-6,8,5,7,7,6,10,8,15,15,15,-5,-6,-4,-4,-4,-4,-4,-3,-3,15,15,-1,-6,-6,-6,-6,-6,-6,-6,-6,9,15,8,-6,-6,-6,-6,-6,-6,-6,-6,3,15,15,-2,-6,-6,-6,-6,-6,-6,-6,-6,12,15,3,-6,-6,-6,-6,-6,-6,-6,-6,1,15,14,-5,-6,-6,-6,-6,-6,-6,-6,-6,11,15,5,-6,-6,-6,-6,-6,-6,-6,-6,-1,15,15,-4,-6,-6,-6,-6,-6,-6,-6,-6,8,15,8,-6,-6,-6,-6,-6,-6,-6,-6,-6,15,15,-3,-6,-6,-6,-6,-6,-6,-6,-6,-2,15,14,-6,-6,-6,-6,-6,-6,-6,-6,-6,9,15,10,-6,-6,-6,-6,-6,-6,-6,-6,-6,15,15,2,-6,-6,-6,-6,-6,-6,-6,-6,-6,15,15,-3,-6,-6,-6,-6,-6,-6,-6,-6,-6,15,15,-6,-6,-6,-6,-6,-6,-6,-6,-6,-3,15,15,-6,-6,-6,-6,-6,-6,-6,-6],[-9,-9,-7,7,12,11,4,-7,-9,-9,-9,-9,-9,4,10,11,12,12,11,10,0,-9,-9,-9,-1,11,12,-2,-6,-6,6,12,10,-6,-9,-9,9,12,-3,-8,-9,-9,-6,9,12,3,-9,-9,12,12,-8,-9,-9,-9,-9,0,12,9,-9,-9,12,12,-7,-9,-9,-9,-9,2,12,6,-9,-9,0,12,5,-8,-9,-9,-2,9,12,-3,-9,-9,-8,1,12,3,3,3,7,12,0,-8,-9,-9,-9,1,12,12,10,12,12,12,-1,-9,-9,-9,1,10,7,2,0,2,2,12,8,-1,-9,-9,12,8,-2,-9,-9,-9,-9,3,12,9,-9,-9,12,1,-9,-9,-9,-9,-9,-9,11,12,-6,-9,12,-4,-9,-9,-9,-9,-9,-9,10,12,-2,-9,12,0,-9,-9,-9,-9,-9,-9,10,12,-3,-9,12,8,-7,-9,-9,-9,-9,-5,12,11,-8,-9,10,12,3,-6,-6,-6,-6,11,12,8,-9,-9,-3,10,12,12,8,10,12,11,10,-8,-9,-9,-9,-6,12,12,12,12,12,9,-8,-9,-9,-9],[-8,-8,-3,9,12,11,0,-8,-8,-8,-8,-8,-8,10,11,12,12,12,11,10,-7,-8,-8,-8,9,12,12,-1,-5,-5,9,12,9,-8,-8,-8,12,12,-4,-7,-8,-8,-5,10,12,3,-8,-8,12,6,-8,-8,-8,-8,-8,-4,12,11,-8,-8,12,-1,-8,-8,-8,-8,-8,-8,12,12,-8,-8,12,-4,-8,-8,-8,-8,-8,-8,12,12,-8,-8,12,0,-8,-8,-8,-8,-8,-7,12,12,-7,-8,12,8,-7,-8,-8,-8,-8,3,12,12,-7,-8,7,12,2,-3,-6,-5,1,12,12,12,-7,-8,-2,8,12,7,3,4,12,4,12,12,-7,-8,-8,-2,5,6,6,5,5,-8,12,12,-8,-8,-8,-8,-8,-6,-6,-7,-8,-8,12,12,-8,-8,-2,-3,-8,-8,-8,-8,-8,-4,12,11,-8,-8,12,11,-7,-8,-8,-8,-7,8,12,3,-8,-8,10,12,-2,-5,-6,-5,0,12,10,-8,-8,-8,-2,11,12,12,7,12,12,11,-3,-8,-8,-8,-8,-2,12,12,12,12,12,-5,-8,-8,-8,-8]];
+var CALIB_OFFS = [0, 13, 33, 46, 66, 79, 99, 112];   // 烧录码 8 个数字槽的锚点偏移（固定模板实测）
+/* 模板归一化：int 量化值 → 零均值单位化，相关分回到 [-1,1]，margin 阈值才有意义 */
+var CALIB_TPL = (function () {
+  var raw = CALIB_TPL_RAW;
+  var out = {};
+  for (var d = 0; d < 10; d++) {
+    var t = raw[d], m = 0, i;
+    for (i = 0; i < t.length; i++) m += t[i];
+    m /= t.length;
+    var nn = 0;
+    for (i = 0; i < t.length; i++) { var dv = t[i] - m; nn += dv * dv; }
+    nn = Math.sqrt(nn);
+    var f = new Float32Array(t.length);
+    for (i = 0; i < t.length; i++) f[i] = nn > 1e-9 ? (t[i] - m) / nn : 0;
+    out[d] = f;
+  }
+  return out;
+})();
+var CALIB_CELL_W = 12, CALIB_CELL_H = 18;
+var calib = { ok: false, a: 0, b: 1, running: false, done: '' };
+var calibCv = null;
+
+function calibKey(bvid) { return 'calib:' + bvid; }
+var CALIB_GLOBAL_KEY = 'calib:__global__';
+/** 换场/解析完成时调用：per-bvid → 全局（实测所有 VCNC 视频共用同一条漂移线，
+ *  一次校准处处套用，不必每场重算）→ 都没有则恒等映射 */
+function calibLoad(bvid) {
+  calib.ok = false; calib.a = 0; calib.b = 1; calib.done = '';
+  var keys = [calibKey(bvid), CALIB_GLOBAL_KEY];
+  for (var i = 0; i < keys.length; i++) {
+    var raw = safeGet(keys[i]);
+    if (!raw) continue;
+    try {
+      var j = JSON.parse(raw);
+      if (j && typeof j.a === 'number' && j.b > 0.9 && j.b < 1.1) {
+        calib.ok = true; calib.a = j.a; calib.b = j.b;
+        calib.done = i === 0 ? 'cached' : 'cached-global';
+        return;
+      }
+    } catch (e) {}
+  }
+}
+function calibSave(bvid) {
+  var val = JSON.stringify({ a: Math.round(calib.a * 1000) / 1000, b: Math.round(calib.b * 1e6) / 1e6 });
+  try {
+    safeSet(calibKey(bvid), val);
+    safeSet(CALIB_GLOBAL_KEY, val);   // 同一条漂移线对所有场生效
+  } catch (e) {}
+}
+/** 原始（烧录）时间 → 流时间 */
+function toStream(t) { return calib.ok ? (t - calib.a) / calib.b : t; }
+/** 流时间 → 原始（烧录）时间（HUD/列表显示用） */
+function toOrig(t) { return calib.ok ? calib.a + calib.b * t : t; }
+/** 自动补时：校准成功后残余误差 ≤0.5s（拟合残差+读数误差+上传者取整），小补时即可；
+ *  未校准（短视频/OCR 失败）则放大补时兜底。用户手动改步进器时 padAuto 关闭。 */
+function effPadFront() { return SETTINGS.padAuto ? (calib.ok ? 1.5 : 2.5) : SETTINGS.padFront; }
+function effPadBack() { return SETTINGS.padAuto ? (calib.ok ? 2.0 : 3.0) : SETTINGS.padBack; }
+
+/* ---- 烧录码 OCR：canvas 抓帧 → 顶帽滤波 → 固定槽位切割 → 模板相关分类 ---- */
+function calibBoxBlur(src, w, h, r) {
+  var W1 = w + 1, ii = new Float64Array(W1 * (h + 1));
+  for (var y = 0; y < h; y++) {
+    var rs = 0;
+    for (var x = 0; x < w; x++) { rs += src[y * w + x]; ii[(y + 1) * W1 + x + 1] = ii[y * W1 + x + 1] + rs; }
+  }
+  var out = new Float32Array(w * h);
+  for (var y2 = 0; y2 < h; y2++) {
+    var ya = Math.max(0, y2 - r), yb = Math.min(h, y2 + r + 1);
+    for (var x2 = 0; x2 < w; x2++) {
+      var xa = Math.max(0, x2 - r), xb = Math.min(w, x2 + r + 1);
+      var s = ii[yb * W1 + xb] - ii[ya * W1 + xb] - ii[yb * W1 + xa] + ii[ya * W1 + xa];
+      out[y2 * w + x2] = s / ((yb - ya) * (xb - xa));
+    }
+  }
+  return out;
+}
+function calibNormCell(th, w, ry0, ry1, a, b) {
+  var hh = ry1 - ry0, CW = CALIB_CELL_W, CH = CALIB_CELL_H;
+  var v = new Float32Array(CW * CH);
+  for (var ty = 0; ty < CH; ty++) {
+    var ya = ry0 + Math.floor(ty * hh / CH);
+    var yb = ry0 + Math.max(ya + 1 - ry0, Math.floor((ty + 1) * hh / CH));
+    for (var tx = 0; tx < CW; tx++) {
+      // 每个 tx 只取自己负责的 x 子区间（此前整槽平均导致 12 列全同 → 全是条纹）
+      var xa = a + Math.floor(tx * (b - a) / CW);
+      var xb = a + Math.max(xa + 1 - a, Math.floor((tx + 1) * (b - a) / CW));
+      var s = 0, c = 0;
+      for (var y = ya; y < yb && y < ry1; y++) for (var x = xa; x < xb && x < b; x++) { s += th[y * w + x]; c++; }
+      v[ty * CW + tx] = c ? s / c : 0;
+    }
+  }
+  var m = 0, i;
+  for (i = 0; i < v.length; i++) m += v[i];
+  m /= v.length;
+  var nn = 0;
+  for (i = 0; i < v.length; i++) { var d = v[i] - m; nn += d * d; }
+  nn = Math.sqrt(nn);
+  if (nn > 1e-6) for (i = 0; i < v.length; i++) v[i] = (v[i] - m) / nn;
+  return v;
+}
+function calibCorr(a, b) {
+  var s = 0;
+  for (var i = 0; i < a.length; i++) s += a[i] * b[i];
+  return s;
+}
+/** 读出 video 当前帧左下角烧录时间码（秒）。失败返回 null。 */
+function calibOcr(v) {
+  var w = v.videoWidth, h = v.videoHeight;
+  if (!w || !h) return null;
+  var rw = Math.round(w * 0.22), y0 = Math.round(h * 0.80), rh = h - y0;
+  if (rw < 140 || rh < 40 || rw > 640) return null;
+  if (!calibCv) calibCv = document.createElement('canvas');
+  calibCv.width = rw; calibCv.height = rh;
+  var cx = calibCv.getContext('2d');
+  cx.drawImage(v, 0, y0, rw, rh, 0, 0, rw, rh);
+  var px;
+  try { px = cx.getImageData(0, 0, rw, rh).data; } catch (e) { return null; }
+  var n = rw * rh, i, x, y;
+  var g = new Float32Array(n);
+  for (i = 0; i < n; i++) g[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
+  var blur = calibBoxBlur(g, rw, rh, 10);
+  var th = new Float32Array(n), colsum = new Int32Array(rw), cnt = 0;
+  for (y = 0; y < rh; y++) for (x = 0; x < rw; x++) {
+    var gi = g[y * rw + x], tv = gi - blur[y * rw + x];
+    th[y * rw + x] = tv;
+    if (gi >= 110 && tv >= 25) { colsum[x]++; cnt++; }
+  }
+  if (cnt < 500) return null;
+  var xl = -1;
+  for (x = 0; x < rw; x++) if (colsum[x] >= 10) { xl = x; break; }
+  if (xl < 0 || xl + 124 >= rw) return null;
+  // 行界只在首个数字组的列范围里统计：黑楔边缘外漏的亮内容（斜边）在右侧，
+  // 全区域统计会把行带拉到斜边上去，数字被挤到单元格半截导致全读错
+  var bandRows = 0, ry0 = -1, ry1 = -1;
+  var xr = Math.min(xl + 30, rw);
+  for (y = 0; y < rh; y++) {
+    var rc = 0;
+    for (x = xl; x < xr; x++) if (g[y * rw + x] >= 110 && th[y * rw + x] >= 25) rc++;
+    if (rc >= 3) { if (ry0 < 0) ry0 = y; ry1 = y + 1; bandRows++; }
+  }
+  if (ry0 < 0 || ry1 - ry0 < 14 || ry1 - ry0 > 45) return null;
+  var digits = '';
+  for (var k = 0; k < 8; k++) {
+    var a = xl + CALIB_OFFS[k], b2 = a + 12, ink = 0;
+    for (y = ry0; y < ry1; y++) for (x = a; x < b2; x++) if (g[y * rw + x] >= 110 && th[y * rw + x] >= 25) ink++;
+    if (ink < 40) return null;
+    var cell = calibNormCell(th, rw, ry0, ry1, a, b2);
+    var best = -1, bd = -2, second = -2;
+    for (var d = 0; d < 10; d++) {
+      var sc = calibCorr(cell, CALIB_TPL[d]);
+      if (sc > bd) { second = bd; bd = sc; best = d; } else if (sc > second) second = sc;
+    }
+    // 区分度门槛取宽（0.02）：6/8 等近邻字形在此清晰度下 margin 可低至 0.035，
+    // 单位误读由 3 点拟合的残差校验（≤0.8s）兜底，宁可让它进拟合也不轻易废帧
+    if (bd - second < 0.02) return null;
+    digits += String(best);
+  }
+  return (+digits.slice(0, 2)) * 3600 + (+digits.slice(2, 4)) * 60 + (+digits.slice(4, 6)) + (+digits.slice(6, 8)) / 100;
+}
+
+/** 3 点最小二乘 + 合理性校验（残差/速率/偏移都离谱就放弃） */
+function calibFit(pts) {
+  var n = pts.length, sx = 0, sy = 0, sxx = 0, sxy = 0, i;
+  for (i = 0; i < n; i++) { sx += pts[i][0]; sy += pts[i][1]; sxx += pts[i][0] * pts[i][0]; sxy += pts[i][0] * pts[i][1]; }
+  var mx = sx / n, my = sy / n, vx = sxx / n - mx * mx, cov = sxy / n - mx * my;
+  if (vx < 1e-6) return null;
+  var b = cov / vx, a = my - b * mx, maxr = 0;
+  for (i = 0; i < n; i++) { var r = Math.abs(a + b * pts[i][0] - pts[i][1]); if (r > maxr) maxr = r; }
+  if (maxr > 0.8 || b < 0.98 || b > 1.02 || a < -90 || a > 90) return null;
+  return { a: a, b: b };
+}
+
+/** 校准完成/载入缓存后重建片段序列并保持播放位置 */
+function remapAfterCalib(c) {
+  if (!c || c.state !== 'ready' || !c.info) return;
+  var oldIdx = c.idx, rel = 0, wasPlaying = c.playing;
+  if (oldIdx >= 0 && c.segs[oldIdx]) rel = Math.max(0, c.decks[c.activeDeck].v.currentTime - c.segs[oldIdx].start);
+  c.pauseAll();
+  revReset();
+  c.buildSegs(c.info.matched || []);
+  c.render();
+  if (oldIdx < 0 || !c.segs.length) return;          // 还没开播：序列已重建，等用户按播放
+  var ni = Math.min(oldIdx, c.segs.length - 1);
+  c.jumpTo(ni, rel > 0.05 ? { seekOffset: rel } : {}).then(function () {
+    if (!wasPlaying) c.pauseAll();
+  });
+}
+
+/** 开场后台校准：独立隐藏 video（不打扰播放），3 点采样拟合 */
+async function autoCalibrate(clip) {
+  if (calib.ok || calib.running) return;
+  var bvid = clip.item && clip.item.bvid;
+  var dur = clip.videoDuration;
+  if (!bvid || !dur) return;
+  if (dur < 900) { calib.done = 'skip-short'; return; }   // <15 分钟漂移 <0.9s，补时即可覆盖
+  var src = '';
+  for (var di = 0; di < clip.decks.length; di++) {
+    var cand = clip.decks[(clip.activeDeck + di) % clip.decks.length];
+    var u = cand && (cand.v.currentSrc || cand.v.src);
+    if (u) { src = u; break; }
+  }
+  if (!src) return;
+  calib.running = true;
+  var v = document.createElement('video');
+  try {
+    var t1 = 120;
+    var t2 = Math.min(Math.max(Math.round(dur * 0.45), 900), Math.round(dur) - 180);
+    var t3 = Math.min(Math.round(dur) - 120, t2 + 1800);
+    if (!(t3 > t2 + 600)) { calib.done = 'skip-span'; return; }
+    v.muted = true; v.preload = 'auto';
+    v.setAttribute('playsinline', '');
+    v.style.cssText = 'position:absolute;left:-10px;top:-10px;width:2px;height:2px;opacity:0;pointer-events:none';
+    document.body.appendChild(v);
+    v.src = src;
+    try { v.load(); } catch (e) {}
+    var times = [t1, t2, t3], samples = [];
+    for (var i = 0; i < 3; i++) {
+      await new Promise(function (res) {                       // 等元数据
+        var to = setTimeout(res, 15000);
+        if (v.readyState >= 1) { clearTimeout(to); res(); }
+        else v.addEventListener('loadedmetadata', function () { clearTimeout(to); res(); }, { once: true });
+      });
+      if (v.readyState < 1) throw new Error('meta timeout');
+      var tWanted = times[i];
+      await new Promise(function (res) {                       // seek + 解码
+        var to = setTimeout(res, 15000);
+        v.addEventListener('seeked', function () { clearTimeout(to); setTimeout(res, 250); }, { once: true });
+        try { v.currentTime = tWanted; } catch (e) { clearTimeout(to); res(); }
+      });
+      if (Math.abs(v.currentTime - tWanted) > 2) throw new Error('seek fail');
+      var sec = calibOcr(v);
+      if (sec == null) {                        // 偶发：seeked 后帧尚未呈现，稍候重抓一次
+        await sleep(500);
+        sec = calibOcr(v);
+      }
+      diag('calib t=' + tWanted + ' ocr=' + (sec == null ? 'fail' : sec.toFixed(2)));
+      if (sec == null) throw new Error('ocr fail');
+      samples.push([tWanted, sec]);
+    }
+    var fit = calibFit(samples);
+    if (!fit) { calib.done = 'fit-fail'; diag('calib fit fail ' + JSON.stringify(samples)); return; }
+    calib.a = fit.a; calib.b = fit.b; calib.ok = true; calib.done = 'ok';
+    calibSave(bvid);
+    toast('已自动对齐画面时间码（原始时间 ↔ 播放时间）');
+    remapAfterCalib(clip);
+  } catch (e) {
+    calib.done = 'fail:' + (e && e.message);
+    diag('calib fail: ' + (e && (e.message || e)));
+  } finally {
+    calib.running = false;
+    v.removeAttribute('src');
+    try { v.load(); } catch (e) {}
+    if (v.parentNode) v.parentNode.removeChild(v);
+  }
+}
+/** resolve 成功后调度（有缓存直接生效；无缓存 2.5s 后后台跑，不打扰起播） */
+function scheduleCalib(clip) {
+  var bvid = clip.item && clip.item.bvid;
+  if (!bvid || calib.ok || calib.running) return;
+  setTimeout(function () { autoCalibrate(clip); }, 2500);
+}
+
 /** 置顶评论时间戳 → 片段序列（规则同 H-Player：显式时长优先，否则相邻间隔推断） */
 ClipPlayer.prototype.buildSegs = function (matched) {
   var its = [];
@@ -507,6 +780,7 @@ ClipPlayer.prototype.buildSegs = function (matched) {
   }
   its.sort(function (a, b) { return a.s0 - b.s0; });
   var segs = [];
+  var padF = effPadFront(), padB = effPadBack(), invB = calib.ok ? 1 / calib.b : 1;
   for (var k = 0; k < its.length; k++) {
     var it = its[k];
     var d;
@@ -514,13 +788,14 @@ ClipPlayer.prototype.buildSegs = function (matched) {
     else if (it.s1 != null && it.s1 > it.s0) d = clamp(it.s1 - it.s0, 3, 60);
     else if (k + 1 < its.length && its[k + 1].s0 > it.s0) d = clamp(its[k + 1].s0 - it.s0, 3, 30);
     else d = 10;
-    var start = Math.max(0, it.s0 - SETTINGS.padFront);
-    var dur = d + SETTINGS.padFront + SETTINGS.padBack;
+    // 评论时间戳按原始录像（烧录钟）记：先过对齐映射再落流时间轴
+    var start = Math.max(0, toStream(it.s0) - padF);
+    var dur = d * invB + padF + padB;
     if (this.videoDuration > 0) {
       if (start >= this.videoDuration - 0.2) continue;
       if (start + dur > this.videoDuration) dur = Math.max(0.6, this.videoDuration - start);
     }
-    segs.push({ start: start, dur: dur, note: it.m.text || '' });
+    segs.push({ start: start, dur: dur, note: it.m.text || '', orig: it.s0 });
   }
   this.segTotal = segs.length;               // 筛选前的片段总数（设置页显示命中数）
   // 集锦分类：按备注字符字面筛选（原片模式不筛）；筛完为空则回退全部并提示
@@ -2672,7 +2947,8 @@ function renderSegFloat(force) {
       no.textContent = (i + 1) < 10 ? '0' + (i + 1) : '' + (i + 1);
       var t = document.createElement('span');
       t.className = 'sf-t';
-      t.textContent = fmt(segs[i].start);
+      // 已对齐的场显示原始（烧录）时间，与评论/画面时间码一致
+      t.textContent = fmt(segs[i].orig != null ? segs[i].orig : segs[i].start);
       var note = document.createElement('span');
       note.className = 'sf-note';
       note.textContent = String(segs[i].note == null ? '' : segs[i].note)
@@ -3492,7 +3768,7 @@ function seekBarShow(target) {
     var sign = delta >= 0 ? '+' : '−';
     var b = c.tipEl.querySelector('b'), sp = c.tipEl.querySelector('span');
     if (b) b.textContent = sign + Math.abs(delta).toFixed(1) + 's';
-    if (sp) sp.textContent = fmt(target);
+    if (sp) sp.textContent = fmt(toOrig(target));   // 显示原始（烧录）时间
     c.tipEl.style.left = (clamp(p, 0.1, 0.9) * 100).toFixed(2) + '%';
     c.tipEl.style.display = 'block';
   }
@@ -3666,8 +3942,13 @@ function syncZoomChips() {
 }
 function syncPadValues() {
   var a = $('#padFrontVal'), b = $('#padBackVal');
-  if (a) a.textContent = SETTINGS.padFront.toFixed(1) + 's';
-  if (b) b.textContent = SETTINGS.padBack.toFixed(1) + 's';
+  // 自动模式下显示的是当前生效值（随校准状态变化），手动模式显示用户设定值
+  if (a) a.textContent = (SETTINGS.padAuto ? effPadFront() : SETTINGS.padFront).toFixed(1) + 's';
+  if (b) b.textContent = (SETTINGS.padAuto ? effPadBack() : SETTINGS.padBack).toFixed(1) + 's';
+  var steps = document.querySelectorAll('#padFrontStep, #padBackStep');
+  for (var i = 0; i < steps.length; i++) steps[i].classList.toggle('dim', SETTINGS.padAuto);
+  var sw = $('#padAutoSw');
+  if (sw) sw.classList.toggle('on', SETTINGS.padAuto);
 }
 function syncCatChips() {
   var els = document.querySelectorAll('.cat-chip');
@@ -3920,6 +4201,7 @@ function scheduleSegRebuild(msg) {
   segRebuildTimer = setTimeout(function () { segRebuildTimer = null; rebuildActiveSegs(msg); }, 550);
 }
 function padMsg() {
+  if (SETTINGS.padAuto) return '补时 自动（前 ' + effPadFront() + 's / 后 ' + effPadBack() + 's' + (calib.ok ? '，已对齐时间码）' : '）');
   return '补时 前 ' + SETTINGS.padFront + 's / 后 ' + SETTINGS.padBack + 's';
 }
 function bindPadStepper(id, key) {
@@ -3929,6 +4211,7 @@ function bindPadStepper(id, key) {
   for (var i = 0; i < btns.length; i++) {
     (function (b) {
       b.addEventListener('click', function () {
+        if (SETTINGS.padAuto) SETTINGS.padAuto = false;   // 手动调整即接管
         var dflt = key === 'padFront' ? 1 : 2;
         SETTINGS[key] = normPad(SETTINGS[key] + parseFloat(b.getAttribute('data-step')), dflt);
         saveSettings();
@@ -4054,6 +4337,17 @@ function bindSettings() {
 
   bindPadStepper('#padFrontStep', 'padFront');
   bindPadStepper('#padBackStep', 'padBack');
+
+  // 自动补时开关：开 = 随时间码对齐状态自动取值；关 = 用步进器手动值
+  var padAutoSw = $('#padAutoSw');
+  if (padAutoSw) {
+    padAutoSw.addEventListener('click', function () {
+      SETTINGS.padAuto = !SETTINGS.padAuto;
+      saveSettings();
+      syncPadValues();
+      scheduleSegRebuild(padMsg());
+    });
+  }
 
   // 竖屏分屏（上原画面 / 下跟焦放大镜）
   var splitSw = $('#splitSw');

@@ -688,7 +688,7 @@ def t_calib_live(s, ctx):
         return False, "calib not ok: %s" % json.dumps(last, ensure_ascii=False)
     ok = (0.98 <= last.get("b", 0) <= 1.02 and abs(last.get("a", 999)) <= 90
           and last.get("done") in ("ok", "cached", "cached-global"))
-    # 浮窗行显示原始时间（orig 存在且行文本 = fmt(orig)）
+    # 浮窗行显示起播点画面时钟（WYSIWYG：行文本 = fmt(toOrig(start))，与点击后时钟一致）
     r2 = jev(s, """
     (function(){
       var c = activeClip();
@@ -698,11 +698,11 @@ def t_calib_live(s, ctx):
         firstStart: +c.segs[0].start.toFixed(2),
         firstOrig: c.segs[0].orig,
         rowText: row ? row.textContent : null,
-        rowMatchesOrig: row && c.segs[0].orig != null ? row.textContent === fmt(c.segs[0].orig) : null
+        rowMatchesStart: row ? row.textContent === fmt(toOrig(c.segs[0].start)) : null
       });
     })()
     """)
-    if r2.get("rowMatchesOrig") is False:
+    if r2.get("rowMatchesStart") is False:
         ok = False
     return ok, json.dumps({"calib": last, "display": r2}, ensure_ascii=False)
 

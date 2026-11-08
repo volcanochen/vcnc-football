@@ -3037,8 +3037,11 @@ function renderSegFloat(force) {
       no.textContent = (i + 1) < 10 ? '0' + (i + 1) : '' + (i + 1);
       var t = document.createElement('span');
       t.className = 'sf-t';
-      // 已对齐的场显示原始（烧录）时间，与评论/画面时间码一致
-      t.textContent = fmt(segs[i].orig != null ? segs[i].orig : segs[i].start);
+      // 行标签 = 起播点的画面时钟 toOrig(start)（WYSIWYG）：点哪行，时钟就从哪开始。
+      // 原先显示评论时刻 orig——起播带 1.5s 前置垫片（padF），点「4:01」时钟却从
+      // 3:59 开始，用户以为没切过去（真机反馈：「点 4:01 一直在播 4:00」，快速连点
+      // 下时钟永远走不到标签时刻，形成「切不过去」的死循环）
+      t.textContent = fmt(toOrig(segs[i].start));
       var note = document.createElement('span');
       note.className = 'sf-note';
       note.textContent = String(segs[i].note == null ? '' : segs[i].note)

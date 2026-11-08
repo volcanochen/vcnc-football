@@ -376,6 +376,7 @@ function ClipPlayer(item, index) {
   this.busy = false;
   this.active = false;
   this.lastSwitchAt = 0;
+  this.replayGuardAt = null;  // 重播 seek 保护窗起点（tick 段末判定在其落定前不判）
   this.lastHud = 0;
   this.lastPosSave = 0;
   this.pendingResume = null;
@@ -1338,6 +1339,7 @@ ClipPlayer.prototype.loopCurrent = function () {
     return;
   }
   var cur = this.decks[this.activeDeck];
+  this.replayGuardAt = performance.now();   // 同 replayCurrent：seek 落定前不判段末
   try { cur.v.currentTime = seg.start; } catch (e) {}
   if (this.hasAudio) { try { cur.a.currentTime = seg.start; } catch (e) {} }
   cam.track = this.tracks[i] || null;
@@ -1420,6 +1422,24 @@ ClipPlayer.prototype.tick = function (now) {
   } else { this.stallSince = 0; this.stallTries = 0; }
   var end = seg.start + seg.dur;
   var ct = cur.v.currentTime;
+  // 重播 seek 保护窗（真机 logcat 实证：「点当前段重播 → 瞬间跳下一段」）：
+  // replayCurrent/loopCurrent 的回段头 seek 是异步的——seek 未落定期间 ct 仍停在
+  // 段尾（WebView 会吞 seek），tick 按旧位置判段末 → onSegmentEnd → 自动推进
+  // 下一段 = 用户「点 A 播 A+1」。保护窗内：seeking 中不判段末；seek 被吞
+  // （窗内 ct 仍 ≥ 段尾）自动补发；2.5s 超时兜底放行，绝不卡死段末判定
+  if (this.replayGuardAt != null) {
+    if (performance.now() - this.replayGuardAt < 2500) {
+      if (cur.v.seeking) return;
+      if (ct >= end - 0.012) {
+        try { cur.v.currentTime = seg.start; } catch (e) {}
+        if (this.hasAudio) { try { cur.a.currentTime = seg.start; } catch (e) {} }
+        return;
+      }
+      this.replayGuardAt = null;   // seek 已落定（ct 回到段头附近），恢复正常判定
+    } else {
+      this.replayGuardAt = null;
+    }
+  }
   this.followPreheated(ct, end);
   if (ct >= end - 0.012) { this.onSegmentEnd(); return; }
   if (now - this.lastHud > 100) { this.lastHud = now; this.hud(ct, end); }
@@ -3109,6 +3129,7 @@ ClipPlayer.prototype.replayCurrent = function () {
   var cur = this.decks[this.activeDeck];
   revReset();
   this.lastSwitchAt = performance.now();
+  this.replayGuardAt = performance.now();   // tick 保护窗：seek 落定前不判段末
   try { cur.v.currentTime = seg.start; } catch (e) {}
   if (this.hasAudio) { try { cur.a.currentTime = seg.start; } catch (e) {} }
   cam.track = this.tracks[this.idx] || null;
@@ -3124,6 +3145,7 @@ ClipPlayer.prototype.flushQueuedJump = function () {
   if (!q) return;
   this.queuedJump = null;
   if (q.i !== this.idx) this.jumpTo(q.i, q.opts);
+  else if (q.opts && q.opts.user) this.replayCurrent();   // 用户点的就是刚切到的这段 → 回段头重播
 };
 
 /** 锁定/解锁某一段；锁定时若不在该段就先跳过去 */
@@ -3660,6 +3682,7 @@ function bindGestures() {
   });
 }
 
+var tapSynth = { t: 0, x: 0, y: 0 };   // 最近一次 onTap 处理过的 tap（吞其合成 click）
 function onTap(e) {
   if (e && e.target && e.target.closest) {
     if (e.target.closest('button, .sheet, .fallback, .sheet-mask, #segFloat')) return;
@@ -3670,7 +3693,24 @@ function onTap(e) {
     flashPlayBtn();
   }
   if (document.body.classList.contains('chrome-off')) showChrome();
+  // 本次 tap 的动作已由 onTap 完成（暂停/继续+唤回）。随后浏览器合成的 click
+  // 是在 showChrome 之后重新 hit-test 的——此时隐藏控件刚恢复热区，click 会
+  // 命中并触发它们（真机实证：点 btnRev 位置触发倒放、点段行触发跳段）。
+  // 标记本次 tap：捕获阶段吞掉紧跟的同位置 click（只吞第一个，500ms 窗口）。
+  tapSynth.t = Date.now();
+  tapSynth.x = e.clientX; tapSynth.y = e.clientY;
 }
+/* 吞掉 onTap 处理过的 tap 的合成 click：时间+位置双配对，只吞第一个。
+   正常控件点击（onTap 早退路径）没有标记，不受影响。 */
+document.addEventListener('click', function (e) {
+  if (!tapSynth.t) return;
+  var dx = e.clientX - tapSynth.x, dy = e.clientY - tapSynth.y;
+  if (Date.now() - tapSynth.t < 500 && dx * dx + dy * dy < 3600) {
+    tapSynth.t = 0;
+    e.stopPropagation();
+    e.preventDefault();
+  }
+}, true);
 
 /* ---------- 单击播放/暂停：左下角图标反馈 ---------- */
 var flashTimer = null;

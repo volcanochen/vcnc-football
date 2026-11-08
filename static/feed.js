@@ -306,6 +306,7 @@ var CLIP_HTML =
     // 竖屏分屏：上半原始画面（不缩放）
     '<div class="mainview">' +
       '<div class="decks"></div>' +
+      '<canvas class="grabcv"></canvas>' +
       '<canvas class="algo algo-main"></canvas>' +
       '<div class="focus-box"></div>' +
       '<button class="bigplay" type="button">' + ICON_PLAY + '</button>' +
@@ -2509,6 +2510,8 @@ function camApply() {
       for (var di = 0; di < c.decks.length; di++) c.decks[di].v.style.transform = tf;
     }
     if (ov) ov.style.transform = tf;
+    // 倒放抓帧显示画布与 video 同款 transform，取景缩放视觉与正放一致
+    if (rg.on && rg.cvs) rg.cvs.style.transform = tf;
     cam.lx = cam.x; cam.ly = cam.y; cam.lz = s;
   }
   // 焦点框：显示质心在「未缩放画面」中的位置（画在主画面上）
@@ -3745,6 +3748,7 @@ function cancelSeek() {
 function restoreAfterSeek(c, wasPlaying) {
   if (!wasPlaying || !c || c.state !== 'ready' || c.idx < 0) return;
   if (rev.dir < 0) {
+    rg.lastPos = null;               // 用户已 seek 到新位置（v.currentTime = t1），不用旧显示位
     c.playing = true;
     c.render();
     rev.last = performance.now();
@@ -3800,12 +3804,327 @@ var rev = { dir: 1, on: false, last: 0, step: 0.08, lat: 80 };   // dir: 1=正�
 function revStartLoop() {
   if (rev.on) return;
   rev.on = true;
+  var c = activeClip();
+  // v3 抓帧引擎优先：数据 miss 时 v2 的逐帧 seek 会被回源拖成 600ms/步的幻灯片
+  if (c && c.state === 'ready' && c.idx >= 0 && rgCan() && !rg.disabled) {
+    try {
+      rgStart(c, rg.lastPos != null ? rg.lastPos : c.decks[c.activeDeck].v.currentTime);
+      return;
+    } catch (e) { rg.disabled = true; diag('rg start fail: ' + (e && e.message)); }
+  }
   rev.last = performance.now();
   rev.lat = 80;
   rev.step = 0.08;
   revStep();
 }
-function revStopLoop() { rev.on = false; }
+function revStopLoop() { rev.on = false; rgStop(); }
+
+/* ---- 倒放 v3：正放抓帧 + 倒序显示 ----
+   根因（真机实测）：倒放逐帧 seek 是逆着数据流走，目标字节区间一旦磁盘缓存 miss，
+   Chrome 发 Range 回源，seeked 被网络拖住（600ms 超时兜底全中，帧率 1.7fps 幻灯片）；
+   数据回填后同区域 seek 又只要 100~200ms。正放永远顺着数据流，drawImage 回读实测
+   5.4ms/帧。v3 把倒放改成：后台 deck 以 2× 正放抓帧（同时把数据灌进缓存），显示端
+   按内容时间轴倒序消费 ImageBitmap——显示零 seek，帧率均匀，慢动作档天然顺滑。
+   双 deck 交替抓窗（窗 1.6s：2× 速度 0.8s 抓完 < 1.6s 播完，供给过剩）；
+   窗界未就绪时 rg.floor 钳住显示时间轴停帧等待；段首回绕重抓段尾窗。
+   不支持（无 createImageBitmap / 大屏单路解码 LOW_DECK_MODE）或运行失败 →
+   rg.disabled 本次会话退回 v2 乒乓。 */
+var RG_WIN = 2.8;          // 抓帧窗长（秒）：越长窗界衔接次数越少，内存按 ~13帧/s × 窗长 算
+var RG_RATE = 2.5;         // 抓帧播放倍速：生产率须稳超 1× 消费（seek+抓 1.1s 生产 2.8s 内容）
+var RG_GRABMIN = 0.08;     // 收帧最小内容间隔（秒）：currentTime 高倍速下更新过密，限频省内存
+var RG_MAXBUF = 60;        // 位图队列上限（~60 × 1.2MB ≈ 72MB 封顶，防内存膨胀）
+var RG_EPS = 0.03;
+var rg = {
+  on: false, disabled: false, buf: [], cur: null, curTs: 0, pos: 0, floor: 0,
+  last: 0, raf: 0, nextWin: 0, wi: null, cvs: null, ctx: null, gcvs: null, gctx: null,
+  hudT: 0, layW: 0, layH: 0, c: null, idx0: -1, lastPos: null
+};
+
+function rgCan() {
+  return typeof createImageBitmap === 'function' && !LOW_DECK_MODE;
+}
+
+function rgLayout() {
+  var c = rg.c;
+  if (!c || !rg.cvs) return;
+  var mv = c.mainview;
+  var w = mv.clientWidth, h = mv.clientHeight;
+  if (w && h && (w !== rg.layW || h !== rg.layH)) {
+    rg.layW = w; rg.layH = h;
+    rg.cvs.width = w; rg.cvs.height = h;
+  }
+}
+
+/** 从 fromT 位置启动抓帧倒放（fromT 空则从当前段尾起步） */
+function rgStart(c, fromT) {
+  rgStop();
+  rg.c = c; rg.idx0 = c.idx;
+  var seg = c.segs[c.idx];
+  rg.cvs = $('.grabcv', c.el);
+  if (!rg.cvs) {                       // 旧缓存 DOM 兜底：动态补一个
+    rg.cvs = document.createElement('canvas');
+    rg.cvs.className = 'grabcv';
+    $('.decks', c.el).parentNode.insertBefore(rg.cvs, c.algoMain);
+  }
+  rg.ctx = rg.cvs.getContext('2d');
+  if (!rg.gcvs) {
+    rg.gcvs = document.createElement('canvas');
+    rg.gcvs.width = 854; rg.gcvs.height = 356;
+    rg.gctx = rg.gcvs.getContext('2d');
+  }
+  rgLayout();
+  var end = seg.start + seg.dur;
+  if (fromT == null || fromT > end - 0.1 || fromT < seg.start + 0.2) fromT = end - 0.1;
+  rg.pos = fromT;
+  rg.floor = fromT;
+  rg.nextWin = fromT;
+  rg.buf = []; rg.cur = null; rg.curTs = 0; rg.wi = null;
+  rg.last = performance.now();
+  rg.on = true;
+  document.body.classList.add('rev-grab');
+  for (var i = 0; i < c.decks.length; i++) {
+    var d = c.decks[i];
+    d.rgBusy = false;
+    try { d.v.pause(); } catch (e) {}
+    if (c.hasAudio) { try { d.a.pause(); } catch (e) {} }
+  }
+  rgGrabNext();                          // 串行抓窗：双 deck 同时 seek 会在 WebView 媒体流水线上互卡
+  rgPrefetchSeg(c, seg);
+  rg.raf = requestAnimationFrame(rgShow);
+}
+
+/** 倒放窗回溯方向的数据 miss 会让 seek 回源拖到秒级（8s 超时都等不完）。
+ *  对当前段按 ±3MB 余量单独预热：服务端回源拉全段字节，之后窗 seek 全部命中磁盘缓存。
+ *  （集锦预取的线性映射 512KB 余量在高码率区不够，倒放是逆数据流走，miss 概率放大） */
+function rgPrefetchSeg(c, seg) {
+  if (!c.token || !c.videoDuration) return;
+  probeTotalBytes(c.token, 'v').then(function (total) {
+    if (!total || !rg.on) return;
+    var PAD = 3 * 1048576;
+    var b0 = Math.max(0, Math.floor(seg.start / c.videoDuration * total) - PAD);
+    var b1 = Math.min(total - 1, Math.ceil((seg.start + seg.dur) / c.videoDuration * total) + PAD);
+    if (b1 > b0) {
+      fetch('/api/cache/prefetch?token=' + c.token + '&kind=v&i=0&ranges=' + b0 + '-' + b1).catch(function () {});
+      diag('rg prefetch seg bytes=' + ((b1 - b0) / 1048576).toFixed(1) + 'MB');
+    }
+  });
+}
+
+/** 停止并回收。保留 rg.lastPos（暂停恢复用），其余状态清零；幂等 */
+function rgStop() {
+  var wasOn = rg.on;
+  rg.on = false;
+  if (rg.raf) { cancelAnimationFrame(rg.raf); rg.raf = 0; }
+  if (rg.wi) {
+    try { rg.wi.d.v.pause(); } catch (e) {}
+    rg.wi.d.rgBusy = false;
+    rg.wi = null;
+  }
+  for (var i = 0; i < rg.buf.length; i++) { try { rg.buf[i].bm.close(); } catch (e) {} }
+  rg.buf = [];
+  if (rg.cur) { try { rg.cur.close(); } catch (e) {} rg.cur = null; }
+  document.body.classList.remove('rev-grab');
+  if (rg.cvs) rg.cvs.style.transform = 'none';
+  rg.c = null; rg.idx0 = -1;
+  return wasOn;
+}
+
+/** 派发一个抓帧窗给空闲 deck：seek 到窗头 → 2× 正放，rgShow 里收帧。
+ *  串行单窗：任意时刻只允许一个 deck 在 seek（实测双 deck 并行 seek 会让
+ *  WebView 媒体流水线互卡，seek 12s 不完成）；窗完成自动接力下一窗。
+ *  供给率：窗 2.4s 内容，seek 0.2~1s + 2× 速度抓 1.2s ≈ 1.4~2.2s 生产 < 2.4s 消费。 */
+function rgGrabNext() {
+  var c = rg.c;
+  if (!rg.on || !c || rg.wi) return;
+  var seg = c.segs[c.idx];
+  if (!seg) return;
+  var we = rg.nextWin;
+  var ws = we - RG_WIN;
+  if (ws < seg.start + 0.12) ws = seg.start + 0.12;
+  if (we - ws < 0.15) return;          // 段内已覆盖完，等回绕
+  var d = null;
+  for (var i = 0; i < c.decks.length; i++) {
+    if (!c.decks[i].rgBusy) { d = c.decks[i]; break; }
+  }
+  if (!d) return;
+  d.rgBusy = true;
+  // deck 源就绪：备用 deck 可能从未加载过（readyState 0，seekTo 会立即 false），先同源化
+  var url = '/api/media/' + c.token + '/v?i=0';
+  if (!(d.seg === c.idx && d.v.dataset.src === url && d.everReady)) {
+    setSrc(d.v, url);
+    d.seg = c.idx;
+    d.everReady = true;
+  }
+  var wi = { d: d, ws: ws, we: we, last: -1, t0: performance.now(), retry: 0 };
+  rg.wi = wi;
+  rg.nextWin = ws;                     // 窗向前滚动
+  rgWaitMeta(d.v, 10000).then(function (metaOk) {
+    if (!rg.on || rg.wi !== wi) return;
+    if (!metaOk) { rgFail('deck metadata timeout'); return; }
+    return rgSeekWait(d.v, ws, 40000).then(function (ok) {
+      if (!rg.on || rg.wi !== wi) return;
+      if (!ok) { rgFail('seek window fail'); return; }
+      wi.t0 = performance.now();
+      try { d.v.playbackRate = RG_RATE; } catch (e) {}
+      d.v.muted = true;
+      safePlay(d.v);
+    });
+  });
+}
+
+/** 等 video 元数据可 seek（备用 deck 冷态时 setSrc 后要等 loadedmetadata） */
+function rgWaitMeta(v, timeout) {
+  return new Promise(function (res) {
+    if (v.readyState >= 1) return res(true);
+    var done = false;
+    function fin(ok) { if (done) return; done = true; v.removeEventListener('loadedmetadata', fin); res(ok); }
+    v.addEventListener('loadedmetadata', function () { fin(true); });
+    setTimeout(function () { fin(v.readyState >= 1); }, timeout);
+  });
+}
+
+/** 倒放窗 seek：只发一次 currentTime，轮询等待到位（seekTo 的超时重试会取消
+ *  进行中的 seek 造成从头回源死循环；慢 seek 的正确姿势是等它自然完成） */
+function rgSeekWait(v, t, timeout) {
+  return new Promise(function (res) {
+    if (v.readyState < 1) return res(false);
+    var dur = (isFinite(v.duration) && v.duration > 0) ? v.duration : null;
+    t = Math.max(0, dur ? Math.min(t, dur - 0.1) : t);
+    try { v.currentTime = t; } catch (e) { res(false); return; }
+    var st = performance.now();
+    (function poll() {
+      if (!rg.on) return res(false);
+      var done = !v.seeking && v.readyState >= 2 && Math.abs(v.currentTime - t) < 0.4;
+      if (done) return res(true);
+      if (performance.now() - st > timeout) return res(false);
+      setTimeout(poll, 250);
+    })();
+  });
+}
+
+function rgFail(msg) {
+  diag('rg fail: ' + msg);
+  rg.disabled = true;                   // 本次会话退回 v2
+  var c = rg.c;
+  rgStop();
+  rev.on = false;
+  if (c && rev.dir < 0 && c.playing) revStartLoop();
+}
+
+function rgPush(ts, bm) {
+  var b = rg.buf;
+  if (b.length && b[b.length - 1].ts >= ts - RG_EPS) { try { bm.close(); } catch (e) {} return; }
+  b.push({ ts: ts, bm: bm });
+  if (ts < rg.floor) rg.floor = ts;
+  if (b.length > RG_MAXBUF) {
+    var old = b.shift();
+    try { old.bm.close(); } catch (e) {}
+  }
+}
+
+/** 段首回绕：清队列与在抓的窗，从段尾重抓 */
+function rgRewind(seg) {
+  var c = rg.c;
+  for (var i = 0; i < rg.buf.length; i++) { try { rg.buf[i].bm.close(); } catch (e) {} }
+  rg.buf = [];
+  rg.pos = seg.start + seg.dur - 0.1;
+  rg.floor = rg.pos;
+  rg.nextWin = rg.pos;
+  if (rg.wi) {
+    try { rg.wi.d.v.pause(); } catch (e) {}
+    rg.wi.d.rgBusy = false;
+    rg.wi = null;
+  }
+  for (var j = 0; j < c.decks.length; j++) c.decks[j].rgBusy = false;
+  rgGrabNext();
+  rgGrabNext();
+}
+
+/** 显示主循环（rAF）：推进 pos → 收帧 → 消费位图 → 派窗 → 看门狗 */
+function rgShow() {
+  if (!rg.on) return;
+  rg.raf = requestAnimationFrame(rgShow);
+  var c = rg.c;
+  if (!c || c.state !== 'ready' || c.idx < 0 || c.idx !== rg.idx0) { revStopLoop(); return; }
+  var seg = c.segs[c.idx];
+  if (!seg) { revStopLoop(); return; }
+  var now = performance.now();
+  var dt = Math.min(0.25, (now - rg.last) / 1000);
+  rg.last = now;
+
+  /* -- 收帧：抓帧 deck 正放中，currentTime 变化即抓 -- */
+  var wi = rg.wi;
+  if (wi) {
+    var wv = wi.d.v;
+    if (now - wi.t0 > 40000) { rgFail('window watchdog'); return; }
+    if (wv.readyState >= 2 && !wv.seeking) {
+      var t = wv.currentTime;
+      if (t !== wi.last) {
+        var skip = wi.lastGrab != null && t - wi.lastGrab < RG_GRABMIN;
+        wi.last = t;
+        if (!skip && t >= wi.ws - RG_EPS && t <= wi.we + 0.25) {
+          wi.lastGrab = t;
+          try { rg.gctx.drawImage(wv, 0, 0, 854, 356); } catch (e) {}
+          var ts0 = t;
+          (function (ts) {
+            createImageBitmap(rg.gcvs).then(function (bm) {
+              if (rg.on) rgPush(ts, bm); else { try { bm.close(); } catch (e) {} }
+            })['catch'](function () { rgFail('bitmap reject'); });
+          })(ts0);
+        }
+        if (t >= wi.we - RG_EPS || wv.ended) {
+          try { wv.pause(); } catch (e) {}
+          wi.d.rgBusy = false;
+          rg.wi = null;
+          rgGrabNext();
+        }
+      }
+    }
+  }
+
+  /* -- 推进显示时间轴 -- */
+  if (c.playing) {
+    rg.pos -= dt * slowBase();
+    if (rg.pos < rg.floor + 0.02) rg.pos = rg.floor + 0.02;   // 窗界未就绪：钳住停帧
+    if (rg.pos <= seg.start + 0.12) rgRewind(seg);
+  }
+  rg.lastPos = rg.pos;
+
+  /* -- 消费：显示 ts ≤ pos 的最大 ts 帧，回收已过帧 -- */
+  var b = rg.buf;
+  while (b.length && b[b.length - 1].ts > rg.pos + RG_EPS && b[b.length - 1].bm !== rg.cur) {
+    var gone = b.pop();
+    try { gone.bm.close(); } catch (e) {}
+  }
+  if (b.length && b[b.length - 1].ts <= rg.pos + RG_EPS) {
+    var top = b.pop();
+    rgDraw(top.bm);
+    var old = rg.cur;
+    rg.cur = top.bm; rg.curTs = top.ts;
+    if (old) { try { old.close(); } catch (e) {} }
+  }
+
+  /* -- HUD 节流刷新 -- */
+  if (now - rg.hudT > 250) {
+    rg.hudT = now;
+    c.hud(rg.pos, seg.start + seg.dur);
+  }
+}
+
+/** 绘制当前位图（contain 内接 + 黑边，几何与 video object-fit:contain 一致，
+ *  camApply 对 grabcv 写同款 transform 后取景缩放视觉与正放完全一致） */
+function rgDraw(bm) {
+  var cv = rg.cvs, ctx = rg.ctx;
+  if (!cv || !ctx) return;
+  rgLayout();
+  var cw = cv.width, ch = cv.height;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, cw, ch);
+  var vw = 854, vh = 356;
+  var s = Math.min(cw / vw, ch / vh);
+  var dw = vw * s, dh = vh * s;
+  try { ctx.drawImage(bm, (cw - dw) / 2, (ch - dh) / 2, dw, dh); } catch (e) {}
+}
 
 /** 备用 deck 同源化：倒放全程用同一个媒体 URL（整段视频本就一个 src），
  *  通常只需把 seg 标签改到当前段并保持暂停；源不一致时重设 src。 */
@@ -3860,6 +4179,7 @@ async function revStep() {
 /** 回到正向（切段 / 换场 / 停止时用）：停循环 + 复位方向与图标 */
 function revReset() {
   revStopLoop();
+  rg.lastPos = null;
   if (rev.dir !== 1) {
     rev.dir = 1;
     var b = $('#btnRev');
@@ -3888,6 +4208,14 @@ function setPlayDir(d) {
       toast('倒放 ' + slowBase() + '×（音频静音）· 慢动作档同样生效');
     } else {
       revStopLoop();
+      // v3 抓帧模式停止后，显示位置在 rg.lastPos（deck 的 currentTime 停在抓帧窗位置），
+      // 恢复正放前先把 deck 拉回倒放显示到的位置
+      if (rg.lastPos != null && c) {
+        var cur0 = c.decks[c.activeDeck];
+        try { cur0.v.currentTime = rg.lastPos; } catch (e) {}
+        if (c.hasAudio) { try { cur0.a.currentTime = rg.lastPos; } catch (e) {} }
+        rg.lastPos = null;
+      }
       c.resumePlay();
       toast('正向播放');
     }

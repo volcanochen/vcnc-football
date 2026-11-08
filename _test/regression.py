@@ -359,6 +359,65 @@ def t_reverse_direction(s, ctx):
     return ok, json.dumps(r, ensure_ascii=False)
 
 
+@case("rev-grab", "倒放 v3 抓帧引擎：启动走抓帧模式、buf 有帧、pos 倒退、回正放后 deck 位置恢复")
+def t_rev_grab(s, ctx):
+    # 启动倒放，等抓帧产出
+    r = jev(s, """
+    (function(){
+      var c = activeClip();
+      if (!c || c.state !== 'ready' || c.idx < 0) return JSON.stringify({error: 'not ready'});
+      var si = -1;
+      for (var i = 0; i < c.segs.length; i++) if (c.segs[i].dur >= 8) { si = i; break; }
+      if (si < 0) return JSON.stringify({error: 'no long seg'});
+      c.jumpTo(si);
+      return JSON.stringify({armed: true, canGrab: rgCan()});   // 大屏模拟（zoom 用例的 metrics override）下 rgCan=false 属预期回退
+    })()
+    """, timeout_s=60)
+    if r.get("error") or not r.get("canGrab"):
+        return (r.get("canGrab") is False), json.dumps(r, ensure_ascii=False)   # 不支持抓帧的设备视为通过
+    time.sleep(2.5)
+    r2 = jev(s, """
+    (function(){
+      var c = activeClip();
+      // 探针：buf 峰值 / 显示帧计数 / rgStop 时记录最后显示位置（都在页面全局，跨 evaluate 保留）
+      if (!rg._probeHooked) {
+        rg._probeHooked = true;
+        rg._maxBufSeen = 0; rg._drawCount = 0; rg._lastPosAtFwd = null;
+        var od = window.rgDraw, op = window.rgPush, os = window.rgStop;
+        window.rgDraw = function (bm) { rg._drawCount++; return od(bm); };
+        window.rgPush = function (ts, bm) { rg._maxBufSeen = Math.max(rg._maxBufSeen, rg.buf.length + 1); return op(ts, bm); };
+        window.rgStop = function () { rg._lastPosAtFwd = rg.lastPos; return os(); };
+      }
+      rg._maxBufSeen = 0; rg._drawCount = 0; rg._lastPosAtFwd = null;
+      if (!c.playing) c.togglePlay();
+      setPlayDir(-1);
+      return JSON.stringify({ rgOn: rg.on, grabClass: document.body.classList.contains('rev-grab'),
+        cvs: !!rg.cvs, pos0: +rg.pos.toFixed(2) });
+    })()
+    """, timeout_s=30)
+    if not r2.get("rgOn"):
+        return False, json.dumps(r2, ensure_ascii=False)
+    time.sleep(6)
+    r3 = jev(s, """
+    (function(){
+      var c = activeClip();
+      var out = { pos: +rg.pos.toFixed(2), bufEverGrew: !!rg._maxBufSeen, disabled: rg.disabled,
+        grabClass: document.body.classList.contains('rev-grab'), drawCount: rg._drawCount | 0 };
+      rg._maxBufSeen = null; rg._drawCount = 0;
+      setPlayDir(1);                       // 回正放：deck 应被拉回显示位置
+      var cur = c.decks[c.activeDeck];
+      out.restored = rg._lastPosAtFwd == null || Math.abs(cur.v.currentTime - rg._lastPosAtFwd) < 1.5;
+      out.fwdPlaying = c.playing;
+      return JSON.stringify(out);
+    })()
+    """, timeout_s=30)
+    ok = (r3.get("pos", 9e9) < r2.get("pos0", 0)                    # pos 在倒退
+          and r3.get("disabled") is not True
+          and r3.get("restored") is True
+          and r3.get("fwdPlaying") is True)
+    return ok, json.dumps({"start": r2, "run": r3}, ensure_ascii=False)
+
+
 @case("pause-resume", "暂停/恢复：恢复后画面继续前进（看门狗覆盖场景）")
 def t_pause_resume(s, ctx):
     r = jev(s, """

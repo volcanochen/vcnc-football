@@ -155,6 +155,18 @@ body.split .magview { display: block; }
 }
 .deck audio { display: none; }
 
+/* ---------- 倒放抓帧显示画布（v3：正放抓帧 + 倒序显示，盖在 video 之上） ---------- */
+.grabcv {
+  position: absolute;
+  left: 0; top: 0;
+  width: 100%; height: 100%;
+  display: none;
+  pointer-events: none;
+  background: #000;
+  transform-origin: 50% 50%;
+}
+.rev-grab .grabcv { display: block; }
+
 /* ---------- 算法可视化画布（对象/行为标注，随视频同 transform） ---------- */
 .algo {
   position: absolute;

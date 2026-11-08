@@ -3871,6 +3871,7 @@ var rg = {
   cvs: null, ctx: null, gcvs: null, gctx: null,
   hudT: 0, layW: 0, layH: 0,
   c: null, idx0: -1, segRef: null, lastPos: null,
+  starved: false,         // 显示断粮：倒放中显示帧落在 pos 之后 0.5s+（回绕进无帧区冻帧）
   last: 0, raf: 0
 };
 
@@ -3929,8 +3930,7 @@ function rgStart(c, fromT) {
     if (c.hasAudio) { try { d.a.pause(); } catch (e) {} }
   }
   if (!rg.complete) {
-    rgGrabKick();
-    rgPrefetchSeg(c, seg);
+    rgPrefetchSeg(c, seg);             // 细抓 deck 由 rgGrabTick 按播放状态调度（倒放播放中降载，见该函数）
   }
   cam.lz = -1; camApply();             // 强制把 transform 同步到新画布（取景缩放不丢）
   rg.raf = requestAnimationFrame(rgShow);
@@ -3958,11 +3958,8 @@ function rgStop() {
   var wasOn = rg.on;
   rg.on = false;
   if (rg.raf) { cancelAnimationFrame(rg.raf); rg.raf = 0; }
-  if (rg.deck) {
-    try { rg.deck.v.pause(); } catch (e) {}
-    rg.deck.rgBusy = false;
-    rg.deck = null;
-  }
+  // rg.deck（细抓 deck）保留运行：回正放后 rgGrabTick 会把速率调回 1.8× 全速
+  // 补抓整段，无需重新 seek（原实现此处 pause + 复位导致每次退出倒放都重抓窗）
   if (rg.disp) { try { rg.disp.bm.close(); } catch (e) {} rg.disp = null; }
   if (rg.dec && rg.dec.bm) { try { rg.dec.bm.close(); } catch (e) {} }
   rg.dec = null;
@@ -3973,12 +3970,13 @@ function rgStop() {
   return wasOn;
 }
 
-/** 派发抓帧：空闲 deck 同源化 → seek 到抓取起点 → RG_RATE 正放。
+/** 派发抓帧：空闲 deck 同源化 → seek 到抓取起点 → 正放。
  *  串行单 deck：任意时刻只允许一个 deck 在 seek（实测双 deck 并行 seek
- *  会让 WebView 媒体流水线互卡）。 */
-function rgGrabKick() {
-  var c = rg.c, seg = rg.segRef;
-  if (!rg.on || rg.complete || !c || rg.deck || !seg) return;
+ *  会让 WebView 媒体流水线互卡）。由 rgGrabTick 调度，倒放播放中不派发（降载）。 */
+function rgGrabKick(c) {
+  c = c || rg.c || activeClip();
+  var seg = c ? c.segs[c.idx] : rg.segRef;
+  if (rg.complete || rg.disabled || !c || rg.deck || !seg || c.idx < 0) return;
   var d = null;
   for (var i = 0; i < c.decks.length; i++) {
     if (!c.decks[i].rgBusy) { d = c.decks[i]; break; }
@@ -3995,20 +3993,88 @@ function rgGrabKick() {
     d.everReady = true;
   }
   // 断点续抓：从补抓进度 grabHi 之后继续（被动粗帧不算细抓进度，会被重新扫细）；
-  // 空进度从段头抓
+  // 空进度从段头抓。钉住发起时的段引用：期间换段由守卫中止（cache/段 key 已换代）
+  var segRef0 = rg.segRef0;
   var from = rg.grabHi >= 0 ? rg.grabHi + RG_GRABMIN : seg.start + 0.12;
   rgWaitMeta(d.v, 10000).then(function (metaOk) {
-    if (!rg.on || rg.deck !== d) return;
+    if (rg.deck !== d || rg.complete || rg.disabled || rg.segRef0 !== segRef0) return;
     if (!metaOk) { rgFail('deck metadata timeout'); return; }
     return rgSeekWait(d.v, from, 40000).then(function (ok) {
-      if (!rg.on || rg.deck !== d) return;
+      if (rg.deck !== d || rg.complete || rg.disabled || rg.segRef0 !== segRef0) return;
       if (!ok) { rgFail('seek grab start fail'); return; }
       rg.lastT = -1; rg.lastGrab = -1;
-      try { d.v.playbackRate = RG_RATE; } catch (e) {}
+      try { d.v.playbackRate = rgGrabRate(c); } catch (e) {}
       d.v.muted = true;
       safePlay(d.v);
     });
   });
+}
+
+/** 细抓倍速：倒放播放中默认 1.0×（真机对照实测：1.8× 解码+高频编码抢主线程，
+ *  倒放头 30 帧换帧 p50 267ms→挂起后 65ms）；显示断粮（rg.starved，回绕进无帧区
+ *  画面已冻住）时恢复全速——此时抓帧是纯收益；回正放/暂停全速补抓整段 */
+function rgGrabRate(c) {
+  return (rg.on && c && c.playing) ? (rg.starved ? RG_RATE : 1.0) : RG_RATE;
+}
+
+/** 细抓推进（主 tick 驱动，独立于倒放显示循环）：正放/暂停时全速 1.8× 补抓整段；
+ *  倒放播放中——显示有粮 → deck 完全静默（暂停，解码管线+编码全停，真机对照实测
+ *  细抢主线程是倒放卡帧抽搐元凶：头 30 帧换帧 p50 267ms，挂起后 65ms）；
+ *  显示断粮（rg.starved，回绕进无帧区画面已冻住）或 pre-roll → 全速抓（纯收益）。 */
+function rgGrabTick(c) {
+  if (rg.disabled || rg.complete || !rgCan() ||
+      !c || c.state !== 'ready' || c.idx < 0 || c.idx !== rg.segKey || c.segs[c.idx] !== rg.segRef0) {
+    rgGrabHalt();
+    return;
+  }
+  var seg = c.segs[c.idx];
+  var revPlaying = rg.on && c.playing;
+  var suspend = revPlaying && !rg.starved && rg.cache.length > 0;   // 倒放显示有粮 → 全静默
+  var d = rg.deck;
+  if (!d) {
+    if (!suspend) rgGrabKick(c);      // 静默期不派发；pre-roll/断粮/非倒放播放在抓
+    return;
+  }
+  var wv = d.v;
+  if (suspend) {
+    if (!wv.paused) { try { wv.pause(); } catch (e) {} }
+    return;
+  }
+  var now = performance.now();
+  if (now - Math.max(rg.grabStartAt, rg.lastPushAt) > 45000) { rgFail('grab watchdog'); return; }
+  var want = rgGrabRate(c);
+  if (Math.abs(d.v.playbackRate - want) > 0.05) { try { d.v.playbackRate = want; } catch (e) {} }
+  if (wv.paused) { safePlay(wv); return; }   // 从静默/挂起恢复，下一 tick 起抓
+  if (wv.readyState >= 2 && !wv.seeking) {
+    var t = wv.currentTime;
+    if (t !== rg.lastT) {
+      rg.lastT = t;
+      var endT = seg.start + seg.dur - 0.02;
+      if (t >= endT || wv.ended) {
+        rgCapture(wv, Math.min(t, endT));
+        rg.grabHi = endT;
+        try { wv.pause(); } catch (e) {}
+        d.rgBusy = false;
+        rg.deck = null;
+        rg.complete = true;
+        diag('rg cache done n=' + rg.cache.length + ' t=' + t.toFixed(2) + ' endT=' + endT.toFixed(2) + ' ended=' + wv.ended);
+      } else if (rg.lastGrab < 0 || t - rg.lastGrab >= RG_GRABMIN) {
+        if (rg.lastGrab < 0) diag('rg grab first t=' + t.toFixed(2) + ' grabHi=' + (rg.grabHi < 0 ? -1 : +rg.grabHi.toFixed(2)));
+        rg.lastGrab = t;
+        rgCapture(wv, t);
+        rg.grabHi = Math.max(rg.grabHi, t);
+      }
+    }
+  }
+}
+
+/** 细抓中止：仅停当前抓窗把 deck 复位（不清缓存不置 disabled，下次满足条件再续抓） */
+function rgGrabHalt() {
+  if (rg.deck) {
+    try { rg.deck.v.pause(); } catch (e) {}
+    rg.deck.rgBusy = false;
+    rg.deck = null;
+  }
 }
 
 /** 等 video 元数据可 seek（备用 deck 冷态时 setSrc 后要等 loadedmetadata） */
@@ -4032,7 +4098,6 @@ function rgSeekWait(v, t, timeout) {
     try { v.currentTime = t; } catch (e) { res(false); return; }
     var st = performance.now();
     (function poll() {
-      if (!rg.on) return res(false);
       var done = !v.seeking && v.readyState >= 2 && Math.abs(v.currentTime - t) < 0.4;
       if (done) return res(true);
       if (performance.now() - st > timeout) return res(false);
@@ -4118,35 +4183,6 @@ function rgShow() {
   var segEnd = seg.start + seg.dur;
   var head = seg.start + 0.12, endT = segEnd - 0.02;
 
-  /* -- 补抓：deck 正放中，currentTime 变化即抓 -- */
-  var d = rg.deck;
-  if (d) {
-    var wv = d.v;
-    if (now - Math.max(rg.grabStartAt, rg.lastPushAt) > 45000) { rgFail('grab watchdog'); return; }
-    if (wv.readyState >= 2 && !wv.seeking) {
-      var t = wv.currentTime;
-      if (t !== rg.lastT) {
-        rg.lastT = t;
-        if (t >= endT || wv.ended) {
-          rgCapture(wv, Math.min(t, endT));
-          rg.grabHi = endT;
-          try { wv.pause(); } catch (e) {}
-          d.rgBusy = false;
-          rg.deck = null;
-          rg.complete = true;
-          diag('rg cache done n=' + rg.cache.length + ' t=' + t.toFixed(2) + ' endT=' + endT.toFixed(2) + ' ended=' + wv.ended);
-        } else if (rg.lastGrab < 0 || t - rg.lastGrab >= RG_GRABMIN) {
-          if (rg.lastGrab < 0) diag('rg grab first t=' + t.toFixed(2) + ' grabHi=' + rg.grabHi.toFixed(2));
-          rg.lastGrab = t;
-          rgCapture(wv, t);
-          rg.grabHi = Math.max(rg.grabHi, t);
-        }
-      }
-    }
-  } else if (!rg.complete) {
-    rgGrabKick();
-  }
-
   /* -- 缓存一帧都没有（进段立刻倒放）：短暂画准备进度，抓到首帧即转倒序显示 -- */
   if (!rg.cache.length) {
     var frac = rg.grabHi >= head
@@ -4178,6 +4214,9 @@ function rgShow() {
   }
   if (i < 0) i = 0;
   rg.cPtr = i;
+  // 显示断粮判定：显示帧远落在 pos 之后 0.5s+（回绕进无帧区，画面冻在旧帧）
+  // → rgGrabTick 恢复全速细抓（此时抓帧纯收益）；回到有帧区自动恢复静默
+  rg.starved = !!(c.playing && rg.disp && rg.pos - rg.disp.ts > 0.5);
 
   /* -- 换帧（解码到位才换；解码期间画面保持当前帧不黑屏不跳变） -- */
   var want = arr[i];
@@ -4905,7 +4944,8 @@ function tick(now) {
   if (c) c.tick(now);   // 播放推进（段末硬切 / 音画同步）离开播放页也继续
   // 跟焦分析是纯画面工作：离屏时整段停掉，把 CPU 让给列表滚动/页面动画
   if (page === 1 && c) {
-    rgPassiveTick(c);     // 被动预缓存：正放每 0.5s 内容抓一帧，倒放即时起播
+    rgPassiveTick(c);     // 被动预缓存：正放每 0.06s 内容抓一帧，倒放即时顺滑起播
+    rgGrabTick(c);        // 后台细抓：倒放播放中降载+让位，回正放/暂停全速补抓整段
     camSampleLive(now);   // 实时采样（6.7Hz）→ scene
     camTick(now);         // 平滑相机：轨迹/实时混合 + 缓动 + 落 transform
   }

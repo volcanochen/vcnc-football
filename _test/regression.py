@@ -391,6 +391,9 @@ def t_rev_grab(s, ctx):
         window.rgStop = function () { rg._lastPosAtFwd = rg.lastPos; return os(); };
       }
       rg._capCount = 0; rg._drawCount = 0; rg._lastPosAtFwd = null;
+      // 清 rg 现场（跨用例幂等）：上次运行遗留的 complete/缓存会让细抓机制不再触发
+      rg.cache = []; rg.complete = false; rg.grabHi = -1; rg.pasTs = -1; rg.disabled = false; rg.starved = false;
+      if (rg.deck) { try { rg.deck.v.pause(); rg.deck.rgBusy = false; rg.deck = null; } catch (e) {} }
       var pasN = rg.cache.length;          // 点倒放前被动预缓存帧数
       if (!c.playing) c.togglePlay();
       setPlayDir(-1);
@@ -416,35 +419,40 @@ def t_rev_grab(s, ctx):
             minpos = min(minpos, rr["pos"])
             if minpos < r2.get("pos0", 0) - 0.5:
                 break
-    # 等后台补抓把整段细化（complete，~13.5s 段 / 1.8x ≈ 8s；minpos 可能提前达成）
+    # v6 断言：倒放播放中后台细抓静默（保显示顺滑），complete 改在回正放后等——
+    # rgGrabTick 检测到非倒放播放即全速 1.8x 补抓整段
+    r2b = jev(s, """
+    (function(){
+      var c = activeClip();
+      var cur = c.decks[c.activeDeck];
+      var restored = rg._lastPosAtFwd == null || Math.abs(cur.v.currentTime - rg._lastPosAtFwd) < 1.5;
+      setPlayDir(1);                       // 回正放：deck 应被拉回显示位置，细抓恢复全速
+      return JSON.stringify({ restored: restored, on: rg.on, playing: c.playing });
+    })()
+    """, timeout_s=30)
     dl2 = time.time() + 25
+    compOk = False
     while time.time() < dl2:
         rc = jev(s, "JSON.stringify({c: rg.complete, on: rg.on})")
         if rc.get("c"):
+            compOk = True
             break
         time.sleep(1.5)
     r3 = jev(s, """
     (function(){
       var c = activeClip();
-      var out = { pos: +rg.pos.toFixed(2), complete: !!rg.complete, cacheN: rg.cache.length,
-        capCount: rg._capCount | 0, disabled: rg.disabled,
-        grabClass: document.body.classList.contains('rev-grab'), drawCount: rg._drawCount | 0 };
-      rg._capCount = 0; rg._drawCount = 0;
-      setPlayDir(1);                       // 回正放：deck 应被拉回显示位置
-      var cur = c.decks[c.activeDeck];
-      out.restored = rg._lastPosAtFwd == null || Math.abs(cur.v.currentTime - rg._lastPosAtFwd) < 1.5;
-      out.fwdPlaying = c.playing;
-      return JSON.stringify(out);
+      return JSON.stringify({ complete: !!rg.complete, capCount: rg._capCount | 0,
+        disabled: rg.disabled, fwdPlaying: c.playing });
     })()
     """, timeout_s=30)
     ok = (minpos < r2.get("pos0", 0)                                # pos 到过比起点更小的时间（在倒退）
           and instant                                               # v5：点倒放 1.5s 内已画出倒放帧（无准备等待）
-          and r3.get("complete") is True                            # 后台补抓把整段细化
-          and (r3.get("cacheN") or 0) >= 20                         # 缓存帧数合理（0.08s 间隔）
+          and compOk                                                # 回正放后补抓把整段细化
+          and (r3.get("capCount") or 0) >= 60                       # 细抓总量合理（抓帧机制在工作）
           and r3.get("disabled") is not True
-          and r3.get("restored") is True
+          and r2b.get("restored") is True                           # 回正放瞬间 deck 位置 = 倒放显示位置
           and r3.get("fwdPlaying") is True)
-    return ok, json.dumps({"start": r2, "instant": r22, "run": r3, "minpos": minpos}, ensure_ascii=False)
+    return ok, json.dumps({"start": r2, "instant": r22, "run": r3, "restore": r2b, "minpos": minpos}, ensure_ascii=False)
 
 
 @case("chrome-autohide", "chrome 自动隐藏：3 秒无操作后除播放键外的浮动按钮全部淡出，唤回后恢复")

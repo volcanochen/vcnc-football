@@ -173,8 +173,13 @@ public class ProxyServer extends Thread {
         if ("/api/ping".equals(path)) {
             sendJson(os, 200, "{\"ok\":true,\"t\":" + System.currentTimeMillis() + "}");
         } else if ("/api/cache/config".equals(path)) {
+            // 带不带 mb 都能读当前配置；但**只有显式带 mb 才写**——
+            // 无参读取曾把上限静默重置回默认 600（回归测试抓到）
             Map<String, String> q = parseQuery(query);
-            cache.setLimitMb(parseInt(q.get("mb"), MediaCache.DEFAULT_MB));
+            String mb = q.get("mb");
+            if (mb != null && !mb.trim().isEmpty()) {
+                cache.setLimitMb(parseInt(mb, cache.limitMb()));
+            }
             sendCacheStat(os);
         } else if ("/api/cache/stat".equals(path)) {
             sendCacheStat(os);

@@ -731,6 +731,11 @@ ClipPlayer.prototype.showDeck = function (k, hard) {
     d.a.muted = !on || !this.hasAudio;
     try { d.a.volume = SETTINGS.volume; } catch (e) {}
   }
+  // 新显示的 deck 带着的可能是陈旧 transform（缩放/平移中途硬切），强制 camApply 重写
+  if (typeof camApply === 'function' && typeof cam !== 'undefined') {
+    cam.lz = -1;
+    camApply();
+  }
 };
 
 ClipPlayer.prototype.startDeck = async function (d) {
@@ -2221,7 +2226,13 @@ function camApply() {
     ? 'none'
     : 'translate(' + tx.toFixed(1) + 'px,' + ty.toFixed(1) + 'px) scale(' + s.toFixed(3) + ')';
   if (Math.abs(s - cam.lz) > 0.0008 || Math.abs(cam.x - cam.lx) > 0.0004 || Math.abs(cam.y - cam.ly) > 0.0004) {
-    v.style.transform = tf;
+    if (split) {
+      v.style.transform = tf;
+    } else {
+      // 段末硬切 / 跳段会换 deck：transform 必须两路 deck 都写，
+      // 否则切换瞬间新 deck 还是旧值（多半是 none），缩放/平移视觉上突然丢失（横屏全屏最明显）
+      for (var di = 0; di < c.decks.length; di++) c.decks[di].v.style.transform = tf;
+    }
     if (ov) ov.style.transform = tf;
     cam.lx = cam.x; cam.ly = cam.y; cam.lz = s;
   }
@@ -2977,6 +2988,9 @@ function pinchDist() {
 /** 第二根手指落下 → 自定义缩放（固定倍率 + 可平移），彻底关掉自动跟焦 */
 function startPinch() {
   gesture = 'pinch';
+  // 第一根手指可能已触发横滑 seek（拖动期整体暂停了播放）：
+  // 先取消 seek 恢复播放状态，否则捏合结束后画面停在暂停态
+  if (drag.seek) cancelSeek();
   drag.on = false;
   feedEl.style.transition = '';
   feedTransform(active, true);

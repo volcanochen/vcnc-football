@@ -719,11 +719,13 @@ class Handler(BaseHTTPRequestHandler):
             elif path.startswith("/api/media/"):
                 self.handle_media(path, qs)
             elif path == "/api/cache/config":
-                try:
-                    mb = int((qs.get("mb") or [CACHE_DEFAULT_MB])[0] or CACHE_DEFAULT_MB)
-                except (TypeError, ValueError):
-                    mb = CACHE_DEFAULT_MB
-                cache_set_limit(mb)
+                # 只有显式带 mb 才写；无参读取不得重置上限（回归测试抓到）
+                raw = (qs.get("mb") or [""])[0]
+                if raw.strip():
+                    try:
+                        cache_set_limit(int(raw))
+                    except (TypeError, ValueError):
+                        pass
                 self.send_json(cache_stat())
             elif path == "/api/cache/stat":
                 self.send_json(cache_stat())

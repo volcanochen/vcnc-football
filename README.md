@@ -193,6 +193,26 @@ python scripts/make_release.py --tag v0.2.3
 - 真机验证主要在 Galaxy Note8 / SM-N9500（Android 9）上完成；`screencap` 偶发抓不到视频层（全黑），
   判断播放状态请用 `_test/cdp_eval.py` 读 WebView 状态 / 采样 canvas 像素，别只看截图。
 
+## 自动化回归测试
+
+每个功能需求沉淀为 `_test/regression.py` 里的一个用例，改动后跑一遍验证没被破坏——**改功能必改/加用例**。
+
+```bash
+# 设备在线 + CDP 转发后：
+PID=$(adb -s <serial> shell pidof com.vcncfootball | tr -d '\r\n ')
+adb -s <serial> forward tcp:9922 localabstract:webview_devtools_remote_$PID
+python _test/regression.py            # 全量（刷新页面从头验证）
+python _test/regression.py --no-reload  # 复用当前状态（快）
+python _test/regression.py --list     # 用例清单
+```
+
+当前 14 个用例：UI 控件齐全、三页切换、返回键三段语义、横屏双指缩放、
+**横屏缩放跨 deck 硬切不丢失**（回归：横屏自定义缩放失效）、竖屏分屏缩放、
+恢复画面按钮、跟踪球按钮、横滑 seek 落点、倒放方向模型与箭头、暂停恢复、
+集锦浮窗与全场/集锦切换、缓存上限接口（**回归：无参读取重置上限**）、设置迁移。
+测试在横屏用 `Emulation.setDeviceMetricsOverride` 模拟视口、双指用逻辑级模拟
+（直接驱动 startPinch/movePinch）；CDP 触摸注入在 Chrome 74 内核上不可达，不要依赖。
+
 ## 开发历史（摘要）
 
 | 时间 | 事件 |
@@ -214,6 +234,7 @@ python scripts/make_release.py --tag v0.2.3
 | 2026-11-08 | 返回键重做：设置/列表页按返回回播放页；播放页第一次 Toast「再按一次退出」、两秒内再按才退出。播放页新增**单指横滑快进/回退**（拖满一屏 = ±90 秒，120ms 节流**跟手预览**，居中 OSD 显示增量与目标时间，段内边界钳制）。播放键左侧新增 **◀▶ 方向切换按钮**：按一下翻转播放方向，播放键箭头随之 ▶ 正放 / ◀ 倒放（不是 on/off 开关，暂停中也可换向）；倒放逐帧回退 currentTime、音频静音，慢动作三档同样生效，段首回绕到段尾；**调度按解码节奏驱动**——seeked 事件确认上一帧解码完成才发下一步（120ms 超时兜底），新旧 WebView（Chrome 74 红线到最新）同一条平滑路径，不空转 seek 不堆积；真机 Note8 / SM-S9080 双机验证（已随 v0.2.3 发布） |
 | 2026-11-08 | 发布 **v0.2.3**（versionCode 5）：磁盘缓存 600M 默认 + 集锦预取、返回键三段语义、横滑 seek、倒放（多速率生效、seeked 驱动新旧内核通吃）、UI 浮动按钮重构 |
 | 2026-11-08 | 真机反馈修复批次（12 项，**本地改动，尚未升版本/发布**）：横滑回退卡死修复（拖动期整体暂停预览 + tick 卡死看门狗轻推/重备）｜seek 改进度条指示（去居中 OSD，气泡显示增量/目标时间）｜冷启动偶发卡住自动重试（resolve 超时重试 + prepare 元数据换 URL 重试）｜控制条新增「跟」跟踪球按钮｜双指取景 cover→contain（全画面任意位置可达）｜「恢复画面」浮动按钮｜倒放引擎 v2 双 deck 乒乓流水（修 S9080 卡顿抖动鬼畜，S9080 实测步距均匀约 0.9× 实时）｜暂停恢复卡住看门狗覆盖｜集锦浮窗改右侧窄条 118px｜去底部提示字｜浮窗标题变集锦/全场切换按钮｜收起钮加大。Note8（Chrome 74）+ SM-S9080 双机 CDP 验证 |
+| 2026-11-08 | 横屏自定义缩放失效修复 + 回归测试体系：camApply 双 deck 写 transform + showDeck 强制重写（段末硬切曾把缩放视觉打回 1×）｜startPinch 先取消进行中的横滑 seek｜缓存 config 接口无参读取不再重置上限（Java + server.py）｜新增 `_test/regression.py` 14 用例双轮全过 |
 
 原始 3 个提交的历史仍保留在 `volcanochen/H-Player` 本地 `vcnc-football` 分支；
 本仓库为干净起点，不带实验视频与标注数据（原分支历史里有 222 MB 视频，超过 GitHub 单文件限制）。

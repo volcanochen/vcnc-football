@@ -3842,19 +3842,19 @@ function revStartLoop() {
 }
 function revStopLoop() { rev.on = false; rgStop(); }
 
-/* ---- 倒放 v5：被动预缓存 + 即时起播 + 后台补抓 ----
-   v4 起倒放要等整段抓完（6~9s「准备中」），用户等得难受。v5 把抓帧挪到正放
-   顺手做：正放/暂停时对主 deck 每 0.5s 内容时间抓一帧进缓存（被动抓帧，零
-   seek、不占备用 deck、不弹准备画面）。点倒放时缓存里已有看过的部分 → 立即
-   开始倒序显示（粗密度区间画面 0.5s 一换），同时备用 deck 以 1.8× 从细抓进度
-   （grabHi）继续把整段补抓到 0.08s 细密度——已缓存 JPEG 帧按 ts 有序插入，
-   显示循环二分定位天然用上更细的帧，几秒内从粗变细无感升级。回绕/同段再进
-   行为与 v4 一致。仅当缓存一帧都没有（进段立刻倒放、被动帧还没来得及抓）
-   才短暂显示「准备中」。不支持（无 createImageBitmap、LOW_DECK_MODE）或运行
-   失败 → rg.disabled 本次会话退回 v2 乒乓。 */
-var RG_RATE = 1.8;         // 补抓播放倍速：必须低于编码吞吐（0.08s 内容 / 36ms 编码 ≈ 2.2 内容-s/s），否则 currentTime 跳帧漏抓
+/* ---- 倒放 v6：高密度被动预缓存 + 精确起始帧 + 后台补抓 ----
+   v5 被动帧 0.5s 一帧，倒放第一遍走「看过的区间」只有 2fps 幻灯片感，要等
+   后台细抓扫完全段（~7s）才变顺——用户仍嫌卡。实测编码画布降到 640×266 后
+   toDataURL 只要 ~9ms（854×356 要 23ms），显示画布本身才 412×423 CSS px，
+   640 宽绰绰有余 → 被动抓帧加密到 0.06s（≈currentTime 更新粒度，正放 1× 下
+   ~15fps、占用率 ~18%），点倒放第一遍就是 15fps 顺滑倒序。rgStart 时再把主
+   deck 当前画面同步抓一帧做「精确起始帧」——首帧与用户看到的画面严格同位
+   （粗帧网格会让首帧视觉上往后跳最多一个间隔）。缓存 >500 帧自动降密一档
+   防超长段膨胀。不支持（无 createImageBitmap、LOW_DECK_MODE）或运行失败 →
+   rg.disabled 本次会话退回 v2 乒乓。 */
+var RG_RATE = 1.8;         // 补抓播放倍速：必须低于编码吞吐（0.08s 内容 / 12ms 编码余量充足），否则 currentTime 跳帧漏抓
 var RG_GRABMIN = 0.08;     // 补抓最小内容间隔（秒）：currentTime 更新过密，限频省内存
-var RG_PASMIN = 0.5;       // 被动抓帧最小内容间隔（秒）：用户指定密度，够倒放即时起播
+var RG_PASMIN = 0.06;      // 被动抓帧最小内容间隔（秒）：≈currentTime 粒度，正放 1× 下 ~15fps，倒放起播即顺滑
 var RG_EPS = 0.03;
 var rg = {
   on: false, disabled: false,
@@ -3912,6 +3912,12 @@ function rgStart(c, fromT) {
   if (!(rg.cache.length && rg.segKey === c.idx && rg.segRef0 === seg && rg.segTok === c.token)) {
     rg.cache = []; rg.complete = false; rg.grabHi = -1;
     rg.segKey = c.idx; rg.segRef0 = seg; rg.segTok = c.token;
+  }
+  // 精确起始帧：主 deck 当前画面立即同步抓一帧进缓存（零 seek、video 正显示此帧），
+  // 倒放首帧与用户此刻看到的画面严格同位，不被被动帧网格的间隔拖出视觉跳变
+  var mv0 = c.decks[c.activeDeck].v;
+  if (mv0.readyState >= 2 && !mv0.seeking && mv0.currentTime >= head && mv0.currentTime <= end) {
+    rgCapture(mv0, mv0.currentTime);
   }
   rg.last = performance.now();
   rg.on = true;
@@ -4044,19 +4050,20 @@ function rgFail(msg) {
   if (c && rev.dir < 0 && c.playing) revStartLoop();
 }
 
-/** 抓一帧：drawImage → toDataURL 同步 JPEG 编码（~36ms/帧，62KB），按 ts 有序插入缓存。
+/** 抓一帧：drawImage → toDataURL 同步 JPEG 编码（640×266 q0.75 实测 ~9ms/帧、24KB；
+ *  显示画布才 412×423 CSS px，640 宽画质无损余量），按 ts 有序插入缓存。
  *  注意：本 WebView（Chrome 74）的 canvas.toBlob 静默丢全部回调（实测 0/35），必须用 toDataURL。
  *  编码画布惰性创建：被动预缓存（rgPassiveTick）在 rgStart 之前就会调用本函数。 */
 function rgCapture(v, t) {
   if (!rg.gcvs) {
     rg.gcvs = document.createElement('canvas');
-    rg.gcvs.width = 854; rg.gcvs.height = 356;
+    rg.gcvs.width = 640; rg.gcvs.height = 266;
     rg.gctx = rg.gcvs.getContext('2d');
   }
-  try { rg.gctx.drawImage(v, 0, 0, 854, 356); } catch (e) { return; }
+  try { rg.gctx.drawImage(v, 0, 0, 640, 266); } catch (e) { return; }
   rg.lastPushAt = performance.now();
   var url;
-  try { url = rg.gcvs.toDataURL('image/jpeg', 0.8); } catch (e) { return; }
+  try { url = rg.gcvs.toDataURL('image/jpeg', 0.75); } catch (e) { return; }
   if (!url || url.length < 1000) return;
   var arr = rg.cache, lo = 0, hi = arr.length;
   while (lo < hi) { var mid = (lo + hi) >> 1; if (arr[mid].ts < t) lo = mid + 1; else hi = mid; }
@@ -4209,7 +4216,7 @@ function rgDraw(bm) {
   var cw = cv.width, ch = cv.height;
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, cw, ch);
-  var vw = 854, vh = 356;
+  var vw = bm.width || 854, vh = bm.height || 356;
   var s = Math.min(cw / vw, ch / vh);
   var dw = vw * s, dh = vh * s;
   try { ctx.drawImage(bm, (cw - dw) / 2, (ch - dh) / 2, dw, dh); } catch (e) {}
@@ -4229,9 +4236,10 @@ function rgDraw(bm) {
   }
 }
 
-/** 被动预缓存（v5 核心）：正放/暂停时对主 deck 每 RG_PASMIN 内容秒抓一帧进缓存，
- *  点倒放时已有帧 → 即时起播（不再有 6~9s「准备中」）。零 seek、不占备用 deck，
- *  与补抓 deck 互不干扰；帧按 ts 有序插入，补抓细帧混插其中互不冲突。 */
+/** 被动预缓存（v6 核心）：正放/暂停时对主 deck 每 RG_PASMIN(0.06s) 内容时间抓一帧进缓存，
+ *  点倒放时已有帧 → 即时起播且 ~15fps 顺滑（不再有 6~9s「准备中」）。零 seek、不占备用 deck，
+ *  与补抓 deck 互不干扰；帧按 ts 有序插入，补抓细帧混插其中互不冲突。
+ *  缓存超 500 帧（超长段）自动降密一档防膨胀。 */
 function rgPassiveTick(c) {
   if (!c || c.state !== 'ready' || c.idx < 0) return;
   if (rg.on || rg.disabled || !rgCan()) return;
@@ -4248,7 +4256,8 @@ function rgPassiveTick(c) {
   var head = seg.start + 0.12, endT = seg.start + seg.dur - 0.02;
   var t = v.currentTime;
   if (t < head - 0.2 || t > endT + 0.3) return;        // 拖到段外预览不抓
-  if (rg.pasTs >= 0 && Math.abs(t - rg.pasTs) < RG_PASMIN) return;   // 0.5s 限频（含暂停时 t 不变不重复抓）
+  var pasmin = rg.cache.length > 500 ? RG_PASMIN * 2 : RG_PASMIN;   // 超长段防膨胀
+  if (rg.pasTs >= 0 && Math.abs(t - rg.pasTs) < pasmin) return;     // 限频（含暂停时 t 不变不重复抓）
   rg.pasTs = t;
   rgCapture(v, Math.min(t, endT));
 }

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
-<title>VCNC足球沉浸场</title>
+<title>VCNC足球</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2300aeec'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23fff' stroke-width='2'/%3E%3Cpath d='M16 4v5M16 23v5M4 16h5M23 16h5' stroke='%23fff' stroke-width='2'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="feed.css">
 </head>
@@ -73,6 +73,11 @@
     <!-- ============ 第 2 页：设置（独立全屏页，纵向可滚动） ============ -->
     <section class="page page-set" id="pageSet">
       <div class="sheet" id="sheet">
+        <!-- 返回入口移到页顶：底部整块改成「分享与支持」 -->
+        <div class="set-head">
+          <button class="set-back-top" id="setBackTop" type="button">‹ 播放</button>
+          <span class="set-head-title">设置</span>
+        </div>
         <div class="set-row">
           <span class="lab">播放内容</span>
           <div class="seg" id="modeSeg">
@@ -174,6 +179,13 @@
           <span class="cache-stat" id="cacheStat">读取中…</span>
           <button class="chip" id="cacheClear" type="button">清空</button>
         </div>
+        <!-- 网络流量：当前网速 + 本次 / 累计消耗 + 缓存省下的流量 -->
+        <div class="set-row">
+          <span class="lab">网络流量</span>
+          <span class="net-stat" id="netStat">读取中…</span>
+          <button class="chip" id="netReset" type="button">清零</button>
+        </div>
+        <div class="net-hint">只统计真实从 B 站下载的字节；命中本地缓存不产生流量。移动数据下播放页会高亮提示。</div>
         <div class="set-row">
           <span class="lab">登录 Cookie</span>
           <input id="cookieInput" class="ck-input" type="text" placeholder="SESSDATA=…（可选）" spellcheck="false">
@@ -193,9 +205,61 @@
           </div>
         </div>
         
-        <div class="sheet-foot">
-          <button class="set-back" id="setBack" type="button">▶ 回到播放</button>
-          <span>播放页右上角「列表 / 设置」可进入本页<br>VCNC 足球沉浸场</span>
+        <!-- ============ 分享与支持 ============ -->
+        <div class="share-block">
+          <div class="share-brand">
+            <img class="share-logo" src="app-icon.png" alt="VCNC足球">
+            <div class="share-brand-txt">
+              <div class="share-name">VCNC足球</div>
+              <div class="share-en">VCNC football · 五人制足球沉浸场</div>
+            </div>
+          </div>
+
+          <div class="share-sec">分享这个应用</div>
+          <div class="share-qr-row">
+            <img class="share-qr" src="share-qr.png" alt="下载二维码">
+            <div class="share-qr-side">
+              <div class="share-lead">扫码下载最新版</div>
+              <div class="share-sub">把二维码截图或链接发给朋友，对方用手机扫一下就能安装。</div>
+              <div class="share-btns">
+                <button class="chip on" id="shareAppBtn" type="button">一键分享</button>
+                <button class="chip" id="copyDownloadBtn" type="button">复制链接</button>
+              </div>
+            </div>
+          </div>
+
+          <button class="share-link" type="button" data-url="https://github.com/volcanochen/vcnc-football/releases/latest">
+            <span class="sl-txt"><b>下载最新版 APK</b><small>github.com/volcanochen/vcnc-football/releases/latest</small></span>
+            <span class="sl-go">›</span>
+          </button>
+          <button class="share-link" type="button" data-url="https://space.bilibili.com/432185343">
+            <span class="sl-txt"><b>VCNC 的 B 站空间</b><small>space.bilibili.com/432185343 · 看原始比赛录像</small></span>
+            <span class="sl-go">›</span>
+          </button>
+          <button class="share-link" type="button" data-url="https://github.com/volcanochen/vcnc-football">
+            <span class="sl-txt"><b>GitHub 项目主页</b><small>github.com/volcanochen/vcnc-football · 源码与文档</small></span>
+            <span class="sl-go">›</span>
+          </button>
+
+          <div class="share-sec">联系作者</div>
+          <button class="share-link" type="button" data-url="https://github.com/volcanochen/vcnc-football/issues">
+            <span class="sl-txt"><b>问题反馈 · GitHub Issues</b><small>提 bug、提需求最容易被看到</small></span>
+            <span class="sl-go">›</span>
+          </button>
+          <button class="share-link" type="button" data-url="https://space.bilibili.com/432185343">
+            <span class="sl-txt"><b>B 站私信</b><small>点开空间主页 → 发消息</small></span>
+            <span class="sl-go">›</span>
+          </button>
+
+          <div class="share-sec">支持一下</div>
+          <div class="donate-row">
+            <img class="donate-qr" src="donate-qr.png" alt="微信收款码">
+            <div class="donate-side">
+              <div class="share-lead">微信扫码打赏</div>
+              <div class="share-sub">本应用免费、无广告、不收集个人信息。如果它让你看球更省心，可以请作者喝杯咖啡。</div>
+              <div class="share-sub">视频内容来自 B 站公开投稿，版权归原作者所有；本工具仅供个人学习研究。</div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -208,6 +272,9 @@
     <button class="ptab on" data-page="1" type="button">播放</button>
     <button class="ptab" data-page="2" type="button">设置</button>
   </div>
+
+  <!-- 播放页常驻流量提示：当前网速 + 本次消耗（移动数据时高亮告警） -->
+  <div id="netHud" class="net-hud"></div>
 
   <!-- 轻提示：三页共用 -->
   <div id="toast"></div>

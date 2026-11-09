@@ -100,7 +100,7 @@ def main():
         print("创建 Release", tag, "...")
         rel = call("POST", f"{API}/repos/{REPO}/releases", {
             "tag_name": tag,
-            "name": "VCNC 足球沉浸场 " + tag,
+            "name": "VCNC足球 " + tag,
             "body": notes,
             "draft": False,
             "prerelease": False,

@@ -25,6 +25,9 @@ copy /Y "%STATIC%\index.html" "%WWW%\index.html" >nul || goto :err
 copy /Y "%STATIC%\feed.html"  "%WWW%\feed.html"  >nul || goto :err
 copy /Y "%STATIC%\feed.js"    "%WWW%\feed.js"    >nul || goto :err
 copy /Y "%STATIC%\feed.css"   "%WWW%\feed.css"   >nul || goto :err
+copy /Y "%STATIC%\app-icon.png"  "%WWW%\app-icon.png"  >nul || goto :err
+copy /Y "%STATIC%\share-qr.png"  "%WWW%\share-qr.png"  >nul || goto :err
+copy /Y "%STATIC%\donate-qr.png" "%WWW%\donate-qr.png" >nul || goto :err
 
 echo [2/8] aapt2 compile 资源
 "%BT%\aapt2.exe" compile --dir "%APP%\res" -o "%BUILD%\gen\res.zip" || goto :err

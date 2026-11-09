@@ -116,6 +116,8 @@ public class MainActivity extends Activity {
         // 强制只走 IPv4，避免解析/取流卡死。
         try { System.setProperty("java.net.preferIPv4Stack", "true"); } catch (Exception ignore) {}
         setContentView(R.layout.activity_main);
+        // 流量计量必须在任何 B 站请求之前初始化（feed 拉取/取流都会来记账）
+        NetMeter.init(this);
 
         wv = findViewById(R.id.wv);
         btnBack = findViewById(R.id.btnBack);
@@ -300,6 +302,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        NetMeter.flush();   // 把累计流量写盘，强杀/退出不丢统计
         super.onDestroy();
         // 注意：ProxyServer 是进程级单例，这里【不】调用 shutdown()。
         // 折叠屏切屏 / 低内存回收 Activity 时若关掉服务再重启，端口可能变化，
@@ -819,6 +822,38 @@ return true;
         @JavascriptInterface
         public void startUpdate() {
             if (updater != null) updater.downloadAndInstall();
+        }
+        /** 设置页「分享与支持」：外部链接一律交给系统浏览器，不能让 WebView 自己跳走 */
+        @JavascriptInterface
+        public void openUrl(String url) {
+            if (url == null || url.trim().isEmpty()) return;
+            try {
+                Intent it = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                MainActivity.this.startActivity(it);
+            } catch (Exception e) {
+                Toast.makeText(MainActivity.this, "打不开链接", Toast.LENGTH_SHORT).show();
+            }
+        }
+        @JavascriptInterface
+        public void shareText(String text) {
+            try {
+                Intent it = new Intent(Intent.ACTION_SEND);
+                it.setType("text/plain");
+                it.putExtra(Intent.EXTRA_TEXT, text == null ? "" : text);
+                Intent chooser = Intent.createChooser(it, "分享 VCNC足球");
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                MainActivity.this.startActivity(chooser);
+            } catch (Exception ignore) {}
+        }
+        @JavascriptInterface
+        public void copyText(String text) {
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        MainActivity.this.getSystemService(Context.CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(ClipData.newPlainText("vcnc", text == null ? "" : text));
+                Toast.makeText(MainActivity.this, "已复制", Toast.LENGTH_SHORT).show();
+            } catch (Exception ignore) {}
         }
         @JavascriptInterface
         public String getVersionName() {

@@ -10,10 +10,12 @@
 默认连 127.0.0.1:9922（需先 adb forward tcp:9922 localabstract:webview_devtools_remote_<pid>）。
 """
 import json
+import os
 import sys
 import urllib.request
 
-PORT = 9922
+# 与 cdp.py / regression.py 保持一致：可用 CDP_PORT 覆盖，便于两台设备同时验证
+PORT = int(os.environ.get("CDP_PORT", "9922"))
 
 # 沙箱里有 HTTP_PROXY 环境变量，会把 127.0.0.1 的请求也发给代理 → 502。
 # CDP 的 /json 接口必须直连，用空 ProxyHandler 强制绕过。

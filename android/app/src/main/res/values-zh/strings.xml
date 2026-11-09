@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 7+ 按用户「语言偏好列表」逐个匹配资源：真机 locale=zh-Hans-CN，
+     但列表第二项是 en-US；若只有 values/(默认中文) + values-en/(英文)，
+     zh 这一级没有专门资源时系统会回退到第二语言 en，桌面就显示英文名。
+     显式提供 values-zh 让中文环境第一优先级命中。 -->
+<resources>
+    <string name="app_name">VCNC足球</string>
+</resources>

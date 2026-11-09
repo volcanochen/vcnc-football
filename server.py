@@ -77,7 +77,9 @@ def http_json(url: str, cookie: str = "", timeout: int = 20) -> dict:
         headers["Cookie"] = cookie
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+        body = resp.read()
+    NET_METER.add_network(len(body))
+    return json.loads(body.decode("utf-8", "replace"))
 
 
 def http_json_no_origin(url: str, cookie: str = "", timeout: int = 20) -> dict:
@@ -87,7 +89,9 @@ def http_json_no_origin(url: str, cookie: str = "", timeout: int = 20) -> dict:
         headers["Cookie"] = cookie
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+        body = resp.read()
+    NET_METER.add_network(len(body))
+    return json.loads(body.decode("utf-8", "replace"))
 
 
 def mixin_key(orig: str) -> str:
@@ -215,6 +219,59 @@ CACHE_DIR = os.path.join(ROOT, "_cache", "media")
 CACHE_CONFIG = os.path.join(ROOT, "_cache", "config.json")
 CACHE_DEFAULT_MB, CACHE_MIN_MB, CACHE_MAX_MB = 600, 50, 2048
 CACHE_STATS = {"hits": 0, "misses": 0}
+
+
+class NetMeter:
+    """桌面调试版流量计量：与 Android NetMeter 同语义，只记真实上游字节。
+
+    区别：桌面版不跨进程持久化（重启 server.py 归零），网络类型恒为 desktop。
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.session = 0
+        self.total = 0
+        self.session_saved = 0
+        self.saved = 0
+        self.last_bytes = 0
+        self.last_t = time.time()
+        self.speed = 0.0
+
+    def add_network(self, n):
+        with self.lock:
+            self.session += n
+            self.total += n
+
+    def add_saved(self, n):
+        with self.lock:
+            self.session_saved += n
+            self.saved += n
+
+    def stat(self):
+        with self.lock:
+            now = time.time()
+            dt = now - self.last_t
+            inst = max(0.0, (self.session - self.last_bytes) / dt) if dt > 0.05 else 0.0
+            a = 0.65 if inst > self.speed else 0.35
+            self.speed = self.speed * (1 - a) + inst * a
+            if self.speed < 1024:
+                self.speed = 0.0
+            self.last_bytes = self.session
+            self.last_t = now
+            return {"ok": True, "speed": int(self.speed), "session": self.session,
+                    "total": self.total, "sessionSaved": self.session_saved,
+                    "saved": self.saved, "network": "desktop", "ts": int(now * 1000)}
+
+    def reset(self):
+        with self.lock:
+            self.session = self.total = 0
+            self.session_saved = self.saved = 0
+            self.last_bytes = 0
+            self.speed = 0.0
+            self.last_t = time.time()
+
+
+NET_METER = NetMeter()
 
 
 def cache_limit_mb() -> int:
@@ -407,6 +464,7 @@ def cache_prefetch_range(key: str, s: int, e: int, urls: list[str]) -> int:
                         if not b:
                             break
                         f.write(b)
+                        NET_METER.add_network(len(b))
                         written += len(b)
             except OSError:
                 pass
@@ -734,6 +792,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(cache_stat())
             elif path == "/api/cache/prefetch":
                 self.handle_cache_prefetch(qs)
+            elif path == "/api/net/stat":
+                self.send_json(NET_METER.stat())
+            elif path == "/api/net/reset":
+                NET_METER.reset()
+                self.send_json(NET_METER.stat())
             elif path == "/api/ping":
                 self.send_json({"ok": True, "t": time.time()})
             else:
@@ -890,6 +953,7 @@ class Handler(BaseHTTPRequestHandler):
                             if not b:
                                 break
                             self.wfile.write(b)
+                            NET_METER.add_saved(len(b))
                             left -= len(b)
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     pass
@@ -950,6 +1014,7 @@ class Handler(BaseHTTPRequestHandler):
                         if not chunk:
                             break
                         self.wfile.write(chunk)
+                        NET_METER.add_network(len(chunk))
                         if fout:
                             fout.write(chunk)
                         total += len(chunk)

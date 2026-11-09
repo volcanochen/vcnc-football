@@ -1,5 +1,5 @@
 /* =============================================================
-   VCNC 足球沉浸场 · feed 前端
+   VCNC足球（VCNC football）· feed 前端
    - 只播 VCNC 账号的足球视频（/api/feed 动态流）
    - 短视频式沉浸交互：全屏竖滑、自动连播、极简 chrome
    - 焦点缩放：画布帧差 → 运动质心 → 平滑 transform 追随放大
@@ -2966,6 +2966,9 @@ function bindPages() {
   if (vl) vl.addEventListener('click', function () { goPage(1); });
   var sb = $('#setBack');
   if (sb) sb.addEventListener('click', function () { goPage(1); });
+  // 底部「回到播放」已移除，返回入口改到设置页顶部
+  var sbt = $('#setBackTop');
+  if (sbt) sbt.addEventListener('click', function () { goPage(1); });
   var body = $('#vlistBody');
   if (body) {
     body.addEventListener('scroll', function () {
@@ -5150,6 +5153,100 @@ function showFatal(msg) {
   $('#fatal').hidden = false;
 }
 
+/* =============================================================
+   分享与支持（设置页底部）+ 网络流量计量（播放页常驻提示）
+   原生能力走 JS 桥；桌面调试版自动退回浏览器行为。
+   ============================================================= */
+var DOWNLOAD_URL = 'https://github.com/volcanochen/vcnc-football/releases/latest';
+var SHARE_TEXT = 'VCNC足球（VCNC football）—— 只看 VCNC 五人制足球集锦的沉浸播放器：'
+  + '集锦自动连播、镜头跟着球放大、支持倒放与慢动作逐帧看。\n下载：' + DOWNLOAD_URL;
+
+function fmtBytes(n) {
+  n = +n || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+}
+function fmtSpeed(n) { return fmtBytes(n) + '/s'; }
+
+function nativeOpen(url) {
+  if (window.BiliBridge && typeof BiliBridge.openUrl === 'function') {
+    try { BiliBridge.openUrl(url); return; } catch (e) {}
+  }
+  try { window.open(url, '_blank'); } catch (e) { location.href = url; }
+}
+function nativeCopy(t) {
+  if (window.BiliBridge && typeof BiliBridge.copyText === 'function') {
+    try { BiliBridge.copyText(t); return; } catch (e) {}
+  }
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast('链接已复制');
+  } catch (e) { toast('复制失败，请手动长按链接复制'); }
+}
+function nativeShare(t) {
+  if (window.BiliBridge && typeof BiliBridge.shareText === 'function') {
+    try { BiliBridge.shareText(t); return; } catch (e) {}
+  }
+  nativeCopy(t);
+  toast('已复制分享文案，可粘贴给朋友');
+}
+
+function bindShareBlock() {
+  var links = document.querySelectorAll('.share-link');
+  for (var i = 0; i < links.length; i++) {
+    (function (b) {
+      b.addEventListener('click', function () { nativeOpen(b.getAttribute('data-url')); });
+    })(links[i]);
+  }
+  var s = $('#shareAppBtn');
+  if (s) s.addEventListener('click', function () { nativeShare(SHARE_TEXT); });
+  var c = $('#copyDownloadBtn');
+  if (c) c.addEventListener('click', function () { nativeCopy(DOWNLOAD_URL); });
+}
+
+var NET_LAST = null;
+function renderNet(j) {
+  if (!j || !j.ok) return;
+  NET_LAST = j;
+  var mobile = j.network === 'mobile';
+  var hud = $('#netHud');
+  if (hud) {
+    hud.className = 'net-hud' + (mobile ? ' mobile' : '');
+    hud.innerHTML = (mobile ? '移动数据 · ' : '') + '↓ <b>' + fmtSpeed(j.speed)
+      + '</b> · 本次 ' + fmtBytes(j.session) + ' · 累计 ' + fmtBytes(j.total);
+  }
+  var st = $('#netStat');
+  if (st) {
+    st.innerHTML = '当前 <b>' + fmtSpeed(j.speed) + '</b> · 本次 ' + fmtBytes(j.session) + '<br>'
+      + '累计 ' + fmtBytes(j.total) + ' · 缓存已省 ' + fmtBytes(j.saved)
+      + (mobile ? '<br><span class="warn">当前为移动数据，注意套餐流量</span>' : '');
+  }
+}
+function pollNet() {
+  fetch('/api/net/stat').then(function (r) { return r.json(); })
+    .then(renderNet)
+    .catch(function () {});
+}
+function initNetMeter() {
+  pollNet();
+  setInterval(pollNet, 1200);
+  var r = $('#netReset');
+  if (r) r.addEventListener('click', function () {
+    fetch('/api/net/reset').then(function (x) { return x.json(); })
+      .then(function (j) { renderNet(j); toast('累计流量已清零'); })
+      .catch(function () {});
+  });
+}
+
 async function init() {
   loadSettings();
   params = parseParams();
@@ -5159,6 +5256,8 @@ async function init() {
   bindPages();
   bindGestures();
   bindSettings();
+  bindShareBlock();
+  initNetMeter();
   bindCornerCtl();
   applyBrightness();
   applyVolume();

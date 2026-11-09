@@ -183,6 +183,12 @@ public class ProxyServer extends Thread {
             sendCacheStat(os);
         } else if ("/api/cache/stat".equals(path)) {
             sendCacheStat(os);
+        } else if ("/api/net/stat".equals(path)) {
+            // 当前网速 / 本次 / 累计消耗 / 缓存省下的流量 / 网络类型
+            sendJson(os, 200, NetMeter.stat().toString());
+        } else if ("/api/net/reset".equals(path)) {
+            NetMeter.reset();
+            sendJson(os, 200, NetMeter.stat().toString());
         } else if ("/api/cache/clear".equals(path)) {
             cache.clear();
             sendCacheStat(os);
@@ -348,7 +354,10 @@ public class ProxyServer extends Thread {
         byte[] buf = new byte[65536];
         int n;
         try {
-            while ((n = r.stream.read(buf)) > 0) os.write(buf, 0, n);
+            while ((n = r.stream.read(buf)) > 0) {
+                os.write(buf, 0, n);
+                NetMeter.addNetwork(n);   // 透传兜底也是从 B 站下载
+            }
         } catch (IOException e) {
             Log.w(TAG, "media write aborted (client seek/stop): " + e.getMessage());
         } finally {

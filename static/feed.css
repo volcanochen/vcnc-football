@@ -544,27 +544,114 @@ body.chrome-off #segFloat { opacity: 0; pointer-events: none; }
   padding: 10px 2px 0;
   border-top: 1px solid rgba(255, 255, 255, .06);
 }
-.sheet-foot {
-  margin-top: 26px;
-  padding: 18px 0 26px;
-  border-top: 1px solid rgba(255, 255, 255, .06);
-  text-align: center;
-  font-size: 11px;
-  line-height: 1.9;
-  color: rgba(255, 255, 255, .3);
+/* ---------- 设置页顶栏（返回入口从页底搬到页顶） ---------- */
+.set-head {
+  display: flex;
+  align-items: center;
+  padding: 2px 0 12px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, .08);
 }
-.set-back {
-  display: block;
-  margin: 0 auto 10px;
-  padding: 9px 22px;
-  border: 1px solid rgba(255, 255, 255, .2);
-  border-radius: 9px;
-  background: rgba(255, 255, 255, .08);
+.set-back-top {
+  border: 1px solid rgba(255, 255, 255, .18);
+  background: rgba(255, 255, 255, .07);
   color: rgba(255, 255, 255, .9);
+  border-radius: 8px;
+  padding: 6px 12px;
   font-size: 13px;
   font-family: inherit;
   cursor: pointer;
 }
+.set-head-title { margin-left: 12px; font-size: 14px; font-weight: 600; color: #fff; }
+
+/* ---------- 网络流量统计 ---------- */
+.net-stat {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, .55);
+}
+.net-stat b { color: #00aeec; font-weight: 600; }
+.net-stat .warn { color: #f0a020; }
+#netReset { margin-left: 10px; flex: none; }
+.net-hint {
+  font-size: 11px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, .36);
+  padding: 0 2px 10px;
+}
+/* 播放页常驻小胶囊：不随 chrome 自动隐藏，随时能看到流量；移动数据时变橙告警 */
+.net-hud {
+  display: none;
+  position: absolute;
+  top: 58px; left: 14px;
+  z-index: 42;
+  padding: 4px 9px;
+  border-radius: 8px;
+  background: rgba(6, 12, 14, .5);
+  color: rgba(255, 255, 255, .72);
+  font-size: 11px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+body[data-page="1"] .net-hud { display: block; }
+.net-hud.mobile { color: #ffcf70; background: rgba(70, 40, 6, .62); }
+.net-hud b { color: #fff; font-weight: 600; }
+
+/* ---------- 分享与支持 ---------- */
+.share-block { margin-top: 26px; padding-top: 18px; border-top: 1px solid rgba(255, 255, 255, .08); }
+.share-brand { display: flex; align-items: center; padding-bottom: 6px; }
+.share-logo { width: 54px; height: 54px; border-radius: 13px; flex: none; }
+.share-brand-txt { margin-left: 12px; min-width: 0; }
+.share-name { font-size: 16px; font-weight: 600; color: #fff; }
+.share-en { font-size: 11px; color: rgba(255, 255, 255, .45); padding-top: 3px; }
+.share-sec {
+  font-size: 12px;
+  color: #00aeec;
+  font-weight: 600;
+  letter-spacing: .5px;
+  padding: 16px 0 10px;
+}
+.share-qr-row { display: flex; align-items: flex-start; }
+.share-qr { width: 132px; height: 132px; border-radius: 10px; background: #fff; flex: none; }
+.share-qr-side { margin-left: 14px; flex: 1; min-width: 0; }
+.share-lead { font-size: 13px; color: #fff; font-weight: 600; }
+.share-sub { font-size: 11px; line-height: 1.6; color: rgba(255, 255, 255, .48); padding-top: 6px; }
+.share-btns { padding-top: 12px; }
+.share-btns .chip + .chip { margin-left: 8px; }
+.share-link {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .045);
+  color: #fff;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.share-link:active { background: rgba(0, 174, 236, .16); }
+.sl-txt { flex: 1; min-width: 0; }
+.sl-txt b { display: block; font-size: 12px; font-weight: 600; }
+.sl-txt small {
+  display: block;
+  font-size: 10px;
+  color: rgba(255, 255, 255, .42);
+  padding-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sl-go { font-size: 18px; color: rgba(255, 255, 255, .35); margin-left: 8px; }
+.donate-row { display: flex; align-items: flex-start; }
+.donate-qr { width: 132px; border-radius: 10px; background: #fff; flex: none; }
+.donate-side { margin-left: 14px; flex: 1; min-width: 0; }
 
 /* ---------- 软件更新 ---------- */
 .upd-ver { font-size: 12px; color: rgba(255, 255, 255, .62); }

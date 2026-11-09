@@ -132,6 +132,9 @@ public final class MediaCache {
                     if (n <= 0) break;
                     os.write(buf, 0, n);
                     if (tmpOut != null) tmpOut.write(buf, 0, n);
+                    // 命中缓存 = 纯本地读（记为「省下的流量」）；未命中 = 真实网络下载
+                    if (fromCache) NetMeter.addSaved(n);
+                    else NetMeter.addNetwork(n);
                     written += n;
                     left -= n;
                 }
@@ -270,6 +273,7 @@ public final class MediaCache {
                 int n = in.read(buf, 0, (int) Math.min(buf.length, actualEnd - s + 1 - written));
                 if (n <= 0) break;
                 out.write(buf, 0, n);
+                NetMeter.addNetwork(n);   // 后台预取同样消耗真实流量
                 written += n;
             }
         } catch (IOException ex) {

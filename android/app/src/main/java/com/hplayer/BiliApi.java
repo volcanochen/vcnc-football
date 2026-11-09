@@ -404,7 +404,10 @@ return out;
                     while ((line = r.readLine()) != null) sb.append(line).append('\n');
                 }
             }
-            return sb.toString();
+            String body = sb.toString();
+            // 接口 JSON 字节也计入流量（相对视频很小，但「一共用多少」要算上）
+            try { NetMeter.addNetwork(body.getBytes("UTF-8").length); } catch (Exception ignore) {}
+            return body;
         } finally {
             try { c.disconnect(); } catch (Exception ignore) {}
         }

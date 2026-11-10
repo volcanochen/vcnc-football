@@ -254,6 +254,7 @@ body.chrome-off #cornerCtl > :not(#btnPlay) {
 body.chrome-off #pageNav,
 body.chrome-off #viewReset,
 body.chrome-off #segFloat { opacity: 0; pointer-events: none; }
+body.chrome-off #netHud { opacity: 0; pointer-events: none; }   /* 流量胶囊随 chrome 同进退 */
 
 .ch-top {
   position: absolute;
@@ -267,10 +268,17 @@ body.chrome-off #segFloat { opacity: 0; pointer-events: none; }
    独立于 .ch-top（播放页整个顶栏被隐藏），避开右上角 #pageNav 按钮区 */
 .chinfo {
   position: absolute;
-  top: 12px; left: 14px; right: 170px;
+  top: 12px; left: 12px; right: 234px;   /* 右侧让给「流量 + 列表/设置」，JS 会按实测再校准 */
   z-index: 40;
   pointer-events: none;   /* 不挡顶部手势 */
+  display: flex;
+  align-items: center;
+  min-width: 0;
 }
+/* 标题/副标题竖排，过长省略；三连按钮（social.js 注入 .ci-row）紧跟标题字符后面 */
+.chinfo .ci-main { flex: 0 1 auto; min-width: 0; }
+.ci-row { display: flex; align-items: center; min-width: 0; }
+.ci-row .ctitle { flex: 0 1 auto; min-width: 0; }
 .ch-actions { margin-left: auto; display: flex; }
 .ic {
   width: 34px; height: 34px;
@@ -310,7 +318,8 @@ body.chrome-off #segFloat { opacity: 0; pointer-events: none; }
   text-overflow: ellipsis;
   text-shadow: 0 1px 3px rgba(0, 0, 0, .75);
 }
-.csub { margin-top: 3px; font-size: 11px; color: rgba(255, 255, 255, .62); text-shadow: 0 1px 3px rgba(0, 0, 0, .75); }
+.csub { margin-top: 3px; font-size: 11px; color: rgba(255, 255, 255, .62); text-shadow: 0 1px 3px rgba(0, 0, 0, .75);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- 中央播放/暂停 ---------- */
 .bigplay {
@@ -581,21 +590,53 @@ body.chrome-off #segFloat { opacity: 0; pointer-events: none; }
   color: rgba(255, 255, 255, .36);
   padding: 0 2px 10px;
 }
-/* 播放页常驻小胶囊：不随 chrome 自动隐藏，随时能看到流量；移动数据时变橙告警 */
+/* 播放页流量小胶囊：与标题同一行、靠右贴在「列表/设置」页签左侧。
+   信息不精简（实时速率 + 本次 + 累计都在），横排一行——设备端 WebView 设了
+   setMinimumFontSize(12)，字号写小了无效，所以宽度靠紧凑单位 + 细竖线分隔来省。
+   随 chrome 一起隐藏（见上方 body.chrome-off）。 */
 .net-hud {
   display: none;
   position: absolute;
-  top: 58px; left: 14px;
+  top: 10px; right: 134px;      /* JS layoutTopRow() 按页签实测宽度覆盖 */
   z-index: 42;
-  padding: 4px 9px;
+  padding: 3px 5px;
   border-radius: 8px;
   background: rgba(6, 12, 14, .5);
-  color: rgba(255, 255, 255, .72);
-  font-size: 11px;
-  line-height: 1.4;
+  color: rgba(255, 255, 255, .8);
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: right;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  letter-spacing: -.35px;   /* 一行放三个值，挤一点字距给标题多留几个字 */
   pointer-events: none;
+  transition: opacity .3s ease;
+}
+/* 三项信息横排一行，中间用细竖线分隔（比「·」省 6px 且不挤） */
+.net-hud .hud-l1,
+.net-hud .hud-l2,
+.net-hud .hud-l3 { display: inline; }
+.net-hud .hud-l2::before,
+.net-hud .hud-l3::before {
+  content: '';
+  display: inline-block;
+  width: 1px; height: 9px;
+  margin: 0 4px;
+  vertical-align: -1px;
+  background: rgba(255, 255, 255, .24);
+}
+.net-hud .hud-l2,
+.net-hud .hud-l3 { color: rgba(255, 255, 255, .6); }
+.net-hud .hud-k { font-style: normal; }
+/* 窄屏退档：藏掉「本次/累计」标签，后两项并成「本次/累计」一对数字写法 */
+.net-hud.compact .hud-k { display: none; }
+.net-hud.compact .hud-l3::before {
+  content: '/';
+  display: inline;
+  width: auto; height: auto;
+  margin: 0 1px;
+  vertical-align: baseline;
+  background: none;
 }
 body[data-page="1"] .net-hud { display: block; }
 .net-hud.mobile { color: #ffcf70; background: rgba(70, 40, 6, .62); }
@@ -977,14 +1018,14 @@ body.segfloat-off .segfloat { display: none !important; }
   align-items: center;
   z-index: 45;
   background: rgba(0, 0, 0, .6);
-  border-radius: 26px;
-  padding: 6px;
+  border-radius: 20px;
+  padding: 4px;
 }
 #cornerCtl .cbtn {
-  width: 48px;
-  height: 48px;
+  width: 36px;
+  height: 36px;
   border: none;
-  border-radius: 24px;
+  border-radius: 18px;
   background: transparent;
   color: rgba(255, 255, 255, .9);
   font-size: 14px;
@@ -997,10 +1038,27 @@ body.segfloat-off .segfloat { display: none !important; }
   justify-content: center;
   -webkit-tap-highlight-color: transparent;
 }
-#cornerCtl .cbtn svg { width: 28px; height: 28px; }
+#cornerCtl .cbtn svg { width: 26px; height: 26px; }
+/* 播放键比其它键大一号：主操作一眼可见，盲按也稳 */
+#cornerCtl #btnPlay {
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+}
+#cornerCtl #btnPlay svg { width: 30px; height: 30px; }
+/* 倒放键与播放键拉开距离：倒放会立刻改变播放方向，误触代价大 */
+#cornerCtl #btnRev { margin-left: 12px; }
 #cornerCtl .cbtn.slow.on {
   background: #00aeec;
   color: #fff;
+}
+/* 慢动作三档文字较长（0.125×），固定 36px 会溢出压字：按文字自适应宽度。
+   设备端 WebView 最小字号 12px，字号压不下去，只能用宽度换。 */
+#cornerCtl .cbtn.slow {
+  width: auto;
+  min-width: 34px;
+  padding: 0 5px;
+  white-space: nowrap;
 }
 /* 单片段循环：锁定当前段，再点解除（入口只在播放控件里，浮窗行不再带锁） */
 #cornerCtl .cbtn.loop {
@@ -1014,9 +1072,9 @@ body.segfloat-off .segfloat { display: none !important; }
 }
 #cornerCtl .csep {
   width: 1px;
-  height: 24px;
+  height: 20px;
   background: rgba(255, 255, 255, .25);
-  margin: 0 5px;
+  margin: 0 4px;
 }
 #btnPlay.flash {
   background: rgba(0, 174, 236, .6);

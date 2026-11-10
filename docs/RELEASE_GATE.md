@@ -20,19 +20,31 @@
 | 版本一致性 | README「当前版本」、`release/<tag>.md` 的 tag/版本码 | 用户看到的版本号必须和实际 APK 一致 |
 | 版本一致性 | `release/<tag>.apk` 与构建产物字节一致、`SHA256SUMS.txt` 校验和匹配 | 应用内更新的 CDN 回退源读的是仓库 `release/` 里的 APK |
 | 版本一致性 | 归档 APK 没有被 `.gitignore` 忽略、私钥未入库 | 漏提交 APK = 备用下载源 404；私钥入库 = 签名失守 |
-| 源码 | `node --check static/feed.js`、7 个 Python 文件 AST 编译 | 语法错误在 WebView 里是白屏，构建脚本不会报 |
-| 源码 | Chrome 74 红线（`??` `?.` `replaceAll` `:is()` flex `gap` `inset` `clamp()` `aspect-ratio`）零命中 | 目标机型 Note8 是 Chrome 74，用了就直接崩 |
-| 源码 | `feed.html` 的本地图片引用都存在 | 二维码/图标缺一张会让设置页空白块 |
+| 源码 | 3 个 JS（`feed.js` / `qr.js` / `social.js`）`node --check`、10 个 Python 文件 AST 编译 | 语法错误在 WebView 里是白屏，构建脚本不会报 |
+| 源码 | Chrome 74 红线（`??` `?.` `replaceAll` `:is()` flex `gap` `inset` `clamp()` `aspect-ratio`）零命中，覆盖 3 个 JS + 2 个 CSS | 目标机型 Note8 是 Chrome 74，用了就直接崩 |
+| 源码 | `feed.html` 的全部本地 `src` / `href` 引用都存在 | 二维码/图标/脚本缺一个会让页面缺块或模块加载失败 |
+| 源码 | 社交模块 5 个文件齐全（`social.py` / `qr.js` / `social.js` / `social.css` / `BiliSocial.java`） | 漏文件会让账号浮窗静默不工作 |
+| 源码 | App 授权主路径 10 项齐全（JS 桥检测/唤起、`<queries>` 包可见性、`bilibili://browser` 深链、`/api/social/auth`、二维码默认折叠、浮窗同进退隐藏、HUD 与标题同行靠右且信息未精简、三连按钮在标题行、隐藏时长 < 3s） | 唤起链路断一节，登录就退化成假功能 |
 | 资源 | 5 档密度 × 4 张 launcher 图 + 2 个自适应图标 XML + 3 张分享图齐全 | 缺某档在对应 DPI 设备上会回退成模糊图标 |
 | 资源 | `values` / `values-zh` / `values-en` 三套名称 + manifest 用 `@string/app_name` | 少 `values-zh` 会让中文系统回退到英文（真机踩过） |
-| 资源 | `build_apk.sh` 与 `build_apk.bat` 都复制 3 张 PNG | 两条构建链产物必须一致 |
-| APK | zip 内 `assets/www/` 7 个文件齐全 | 前端资源漏拷，装上去是空壳 |
+| 资源 | `build_apk.sh` 与 `build_apk.bat` 都复制 3 张 PNG + 社交模块 3 个文件 | 两条构建链产物必须一致 |
+| APK | zip 内 `assets/www/` 10 个文件齐全 | 前端资源漏拷，装上去是空壳 |
 | APK | `aapt2 dump badging`：包名 / 版本 / 中英标签 / 图标 | 名称、图标、版本号最终以 APK 为准 |
 | APK | `apksigner verify` 通过 | 签名不一致用户装不上更新 |
 | 文档 | 5 份文档的相对链接全部有效 | 拆文档后最容易留下死链 |
-| 接口 | Android `ProxyServer` 与桌面 `server.py` 都有 `/api/net/stat`、`/api/net/reset`；前端 4 个控件 id 齐全 | 两端行为要对齐，桌面调试不能是哑实现 |
+| 接口 | Android `ProxyServer` 与桌面 `server.py` 都有 2 条流量 + 7 条社交端点；前端 4 个控件 id 齐全 | 两端行为要对齐，桌面调试不能是哑实现 |
 | 真机（可选） | 每台设备 `_test/regression.py` 全量 19/19 | 防回归，改功能必跑 |
 | 真机（可选） | 每台设备 `_test/verify_brand_net.js` 全绿 | 品牌 / 分享区 / 流量接口专项验收 |
+| 真机（可选） | 每台设备 `_test/verify_social.js` 全绿 | 左侧浮窗、App 授权桥与端点、二维码默认不显示且兜底可实绘、同进退隐藏、HUD 贴页签且三项同排一行、三连按钮在标题行且未登录为灰、大会员画质门禁、三连接口（已登录时不发真实三连） |
+| 真机（可选） | 每台设备 `_test/verify_top_row.js` 全绿 | 顶行排布专项：头像/昵称/箭头同一行、三连紧跟标题（同一行、间隙 ≤12px）、HUD 同行贴页签且只占一行、播放键更大、倒放键留空隙、收起箭头朝左 |
+| 真机（可选） | 每台设备 `_test/verify_tap.js` 全绿 | 手势语义：单击显示/隐藏浮窗、双击播停且不唤出浮窗、双击后单击仍生效 |
+
+免设备的两条独立回归线（改动社交模块时建议先跑）：
+
+```bash
+python _test/verify_qr_matrix.py     # QR 矩阵与标准库逐点比对（需 node + Python qrcode 库，仅测试用）
+python _test/verify_social_api.py    # 桌面端点冒烟，临时凭证自动清理
+```
 
 真机部分之外都是纯静态检查，不需要设备；`--devices` 才跑真机。
 
@@ -48,7 +60,7 @@
 # 3. 构建
 bash android/build_apk.sh
 # 4. 归档
-cp android/VCNC-Football.apk release/VCNC-Football-v0.2.5.apk
+cp android/VCNC-Football.apk release/VCNC-Football-v0.3.0.apk
 cd release && sha256sum VCNC-Football-*.apk > SHA256SUMS.txt && cd ..
 # 5. 双机装包 + 亮屏联网 + 建 CDP 转发
 for pair in "R5CT90R761Y:9922" "ce061716d822c005017e:9923"; do
@@ -61,7 +73,7 @@ for pair in "R5CT90R761Y:9922" "ce061716d822c005017e:9923"; do
   adb -s $s forward tcp:$p localabstract:webview_devtools_remote_$PID
 done
 # 6. 跑门禁（含真机）
-python scripts/release_gate.py --tag v0.2.5 \
+python scripts/release_gate.py --tag v0.3.0 \
   --devices R5CT90R761Y:9922,ce061716d822c005017e:9923
 ```
 
@@ -73,7 +85,7 @@ python scripts/release_gate.py --tag v0.2.5 \
 只看静态检查时省略 `--devices`：
 
 ```bash
-python scripts/release_gate.py --tag v0.2.5
+python scripts/release_gate.py --tag v0.3.0
 ```
 
 FAIL 时脚本会列出具体项；修完**从头重跑全部检查**，不要只补跑失败的那一项
@@ -98,6 +110,7 @@ tag 已打、且 tag 正好指向当前 HEAD 时重跑（发布后复核模式�
 
 | 版本 | 日期 | 静态门禁 | 真机门禁 | 备注 |
 |---|---|---|---|---|
+| v0.3.0 | 2026-11-11 | **静态全 PASS** | **全 PASS**（S22U 19/19 + Note8 19/19，社交 / 顶行 / 手势三条专项双机全绿） | B 站账号社交模块 + 顶行重排 + 新手势批次；归档 APK versionCode 8、sha256 见 SHA256SUMS.txt |
 | v0.2.5 | 2026-11-10 | **20/20 PASS** | **4/4 PASS**（S22U 19/19 + Note8 19/19，两台专项验收全绿） | 总计 **24/24 PASS**。品牌化 + 分享区 + 流量计量批次；归档 APK sha256 `5943bb4704c7c0fa…`，V3 签名、三语言标签与自适应图标核对通过 |
 
 首次静态跑出现过 1 项 FAIL：`aapt2 dump badging` 的标签实际带单引号、

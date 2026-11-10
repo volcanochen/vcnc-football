@@ -455,16 +455,18 @@ def t_rev_grab(s, ctx):
     return ok, json.dumps({"start": r2, "instant": r22, "run": r3, "restore": r2b, "minpos": minpos}, ensure_ascii=False)
 
 
-@case("chrome-autohide", "chrome 自动隐藏：3 秒无操作后除播放键外的浮动按钮全部淡出，唤回后恢复")
+@case("chrome-autohide", "chrome 自动隐藏：闲置超时后浮动按钮/账号浮窗全部淡出，唤回后恢复")
 def t_chrome_autohide(s, ctx):
     r = jev(s, """
     (function(){
-      var out = {};
+      var out = { idle: window.CHROME_IDLE_MS };
       showChrome();                        // 点亮并等自动隐藏
       return JSON.stringify(out);
     })()
     """)
-    time.sleep(3.6)                        # chromeTimer 3s + 余量
+    # 等待时长从页面读，避免改了 CHROME_IDLE_MS 就漏改这里（2026-11-11 已调到 4500ms）
+    idle_ms = int((r or {}).get("idle") or 4500)
+    time.sleep(idle_ms / 1000.0 + 0.6)
     r2 = jev(s, """
     (function(){
       var out = {};
@@ -476,6 +478,8 @@ def t_chrome_autohide(s, ctx):
       out.playOp = op('#btnPlay'); out.playPe = pe('#btnPlay');
       out.playW = (function(){ var e = $('#btnPlay'); return e ? e.getBoundingClientRect().width : 0; })();
       out.sfOp = op('#segFloat');
+      out.soOp = op('#socFloat');         // 账号浮窗也一起隐藏
+      out.soPe = pe('#socFloat');
       showChrome();
       return JSON.stringify(out);
     })()
@@ -495,6 +499,7 @@ def t_chrome_autohide(s, ctx):
           and r2.get("playOp") == '1' and r2.get("playPe") != 'none'
           and (r2.get("playW") or 0) > 30                # 播放键没被收窄
           and r2.get("sfOp") == '0'
+          and r2.get("soOp") == '0' and r2.get("soPe") == 'none'
           and r3.get("off") is False
           and float(r3.get("navOp") or 0) > 0.9 and float(r3.get("revOp") or 0) > 0.9)
     return ok, json.dumps({"off": r2, "back": r3}, ensure_ascii=False)

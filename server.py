@@ -9,6 +9,8 @@ B 站集锦自动合成播放器 —— 本地服务（纯标准库，无第三�
   /api/cache/config?mb=<N>                                          设置缓存上限（默认 200MB）
   /api/cache/stat                                                   缓存占用 / 命中统计
   /api/cache/clear                                                  清空缓存
+  /api/social/auth | /qrcode | /poll | /me                           客户端授权 / 扫码兜底 / 账号信息（含大会员）
+  /api/social/triple (POST) | /logout (POST)                         一键三连 / 退出登录
   /                                                                 托管 static/ 前端
 
 磁盘缓存在 _cache/media/（已 gitignore）：key 用 bvid|page|qn|v|a，与随机的 token 解耦，
@@ -32,6 +34,8 @@ import urllib.request
 import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import social  # B 站账号社交模块（独立模块，纯标准库）
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(ROOT, "static")
@@ -272,6 +276,8 @@ class NetMeter:
 
 
 NET_METER = NetMeter()
+# 账号接口的上游字节也计入「真实流量」，两端语义一致
+social.METER = NET_METER
 
 
 def cache_limit_mb() -> int:
@@ -797,6 +803,14 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/net/reset":
                 NET_METER.reset()
                 self.send_json(NET_METER.stat())
+            elif path == "/api/social/auth":
+                self.send_json(social.auth())
+            elif path == "/api/social/qrcode":
+                self.send_json(social.qrcode())
+            elif path == "/api/social/poll":
+                self.send_json(social.poll((qs.get("key") or [""])[0]))
+            elif path == "/api/social/me":
+                self.send_json(social.me(force=(qs.get("force") or [""])[0] == "1"))
             elif path == "/api/ping":
                 self.send_json({"ok": True, "t": time.time()})
             else:
@@ -809,12 +823,49 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def do_POST(self):
+        """只有账号类写操作走 POST：三连、登出。带同源校验。"""
+        path = urllib.parse.urlparse(self.path).path
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        raw = self.rfile.read(min(max(n, 0), 64 * 1024)).decode("utf-8", "replace") if n else ""
+        qs = urllib.parse.parse_qs(raw)
+        try:
+            if not self._same_origin():
+                self.send_json({"ok": False, "error": "拒绝跨站请求"}, 403)
+                return
+            if path == "/api/social/triple":
+                self.send_json(social.triple((qs.get("bvid") or [""])[0]))
+            elif path == "/api/social/manual":
+                self.send_json(social.set_manual_cookie((qs.get("cookie") or [""])[0]))
+            elif path == "/api/social/logout":
+                self.send_json(social.logout())
+            else:
+                self.send_json({"ok": False, "error": "not found"}, 404)
+        except Exception as exc:  # noqa: BLE001
+            self.send_json({"ok": False, "error": str(exc)}, 500)
+
+    def _same_origin(self) -> bool:
+        """本地代理监听 127.0.0.1，第三方网页也能发请求过来；写操作必须挡跨域。"""
+        for name in ("Origin", "Referer"):
+            v = (self.headers.get(name) or "").strip()
+            if not v or v.lower() == "null":
+                continue
+            host = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", "", v).split("/")[0].split("?")[0]
+            host = re.sub(r":\d+$", "", host)
+            if host not in ("127.0.0.1", "localhost"):
+                return False
+        return True
+
     # ---------------- 接口 ----------------
     def handle_resolve(self, qs):
         raw = (qs.get("url") or [""])[0]
         page = int((qs.get("p") or ["1"])[0] or 1)
         qn = int((qs.get("qn") or ["80"])[0] or 80)
-        cookie = (qs.get("cookie") or [""])[0]
+        # 手填 Cookie 优先；否则自动套用扫码登录凭证（大会员画质需要）
+        cookie = (qs.get("cookie") or [""])[0] or social.user_cookie()
         if not raw.strip():
             self.send_json({"ok": False, "error": "请填写视频链接或 BV 号"}, 400)
             return
@@ -886,7 +937,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_feed(self, qs):
         offset = (qs.get("offset") or [""])[0]
-        cookie = (qs.get("cookie") or [""])[0]
+        cookie = (qs.get("cookie") or [""])[0] or social.user_cookie()
         try:
             self.send_json(space_feed(offset, cookie))
         except Exception as exc:  # noqa: BLE001

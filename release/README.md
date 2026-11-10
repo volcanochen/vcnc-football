@@ -5,8 +5,8 @@
 ```
 release/
 ├── README.md                      # 本说明
-├── v0.2.5.md / v0.2.4.md / …      # 各版本 Release 说明（GitHub Release 正文直接用它）
-├── VCNC-Football-v0.2.5.apk       # 已签名 APK（与 GitHub Release 资产是同一个文件）
+├── v0.3.0.md / v0.2.5.md / …      # 各版本 Release 说明（GitHub Release 正文直接用它）
+├── VCNC-Football-v0.3.0.apk       # 已签名 APK（与 GitHub Release 资产是同一个文件）
 └── SHA256SUMS.txt                 # 全部 APK 的校验和
 ```
 

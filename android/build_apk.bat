@@ -25,6 +25,9 @@ copy /Y "%STATIC%\index.html" "%WWW%\index.html" >nul || goto :err
 copy /Y "%STATIC%\feed.html"  "%WWW%\feed.html"  >nul || goto :err
 copy /Y "%STATIC%\feed.js"    "%WWW%\feed.js"    >nul || goto :err
 copy /Y "%STATIC%\feed.css"   "%WWW%\feed.css"   >nul || goto :err
+copy /Y "%STATIC%\qr.js"      "%WWW%\qr.js"      >nul || goto :err
+copy /Y "%STATIC%\social.js"  "%WWW%\social.js"  >nul || goto :err
+copy /Y "%STATIC%\social.css" "%WWW%\social.css" >nul || goto :err
 copy /Y "%STATIC%\app-icon.png"  "%WWW%\app-icon.png"  >nul || goto :err
 copy /Y "%STATIC%\share-qr.png"  "%WWW%\share-qr.png"  >nul || goto :err
 copy /Y "%STATIC%\donate-qr.png" "%WWW%\donate-qr.png" >nul || goto :err

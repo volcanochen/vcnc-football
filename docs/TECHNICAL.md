@@ -16,6 +16,8 @@
 │   └── RELEASE_GATE.md                  # 发布门禁清单、跑法与执行记录
 ├── static/
 │   ├── feed.html / feed.js / feed.css   # 沉浸场前端（WebView 加载）
+│   ├── qr.js                            # 纯 JS QR 编码器（byte/ECC M/v1~10，离线无依赖）
+│   ├── social.js / social.css           # 左侧账号浮窗、App 授权登录、画质与三连
 │   ├── index.html                      # 默认首页，跳转到 feed.html
 │   ├── app-icon.png                    # 设置页品牌图标（与 launcher 图标同源）
 │   ├── share-qr.png                    # 最新版下载页二维码
@@ -26,6 +28,7 @@
 │   ├── release_gate.py                  # 发布门禁（版本/资源/语法/APK/文档/真机）
 │   └── make_release.py                  # 创建 GitHub Release 并上传 APK
 ├── server.py                           # 桌面调试服务器（/api/feed、/api/resolve、/api/media、/api/net/stat + 磁盘缓存）
+├── social.py                            # 桌面版 B 站账号模块（与 Android BiliSocial.java 同语义）
 ├── start.cmd                           # Windows 一键起桌面版
 ├── _cache/                              # 桌面版视频磁盘缓存（运行时生成，已 gitignore）
 ├── android/
@@ -40,6 +43,7 @@
 │       │   ├── MediaCache.java         # 视频字节磁盘缓存（LRU / 上限 / 命中统计）
 │       │   ├── NetMeter.java           # 网络流量计量（真实上游字节 / 速度 / 累计 / 缓存节省）
 │       │   ├── BiliApi.java            # feed / wbi 签名 / playurl / 评论
+│       │   ├── BiliSocial.java         # 客户端授权(扫码兜底) / nav / 三连 / 凭证持久化
 │       │   ├── UpdateChecker.java      # GitHub Releases 检查 + 下载
 │       │   └── UpdateProvider.java     # content:// 暴露 APK 给系统安装器
 │       ├── assets/www/                 # 构建时由 static/ 复制而来（含 3 张 PNG）
@@ -51,7 +55,10 @@
 │           └── values-en/strings.xml  # 英文名「VCNC football」
 ├── release/                             # 每个版本的发布产物与说明（见 release/README.md）
 └── _test/                               # cdp_eval.py（adb + CDP 读 WebView 状态）、
-                                         # regression.py（19 用例）、verify_brand_net.js（品牌/流量专项）
+                                         # regression.py（19 用例）、verify_brand_net.js（品牌/流量专项）、
+                                         # verify_social.js（真机社交验收）、
+                                         # verify_qr_matrix.py（QR 矩阵比对）、
+                                         # verify_social_api.py（社交端点冒烟）
 ```
 
 > **包名与 Java 包名不一致**：manifest 是 `com.vcncfootball`，Java 类仍在 `com.hplayer`，
@@ -152,7 +159,7 @@ python server.py     # 或双击 start.cmd
 文档链接、双机回归），门禁 FAIL 时禁止发布。一次完整发布：
 
 ```bash
-TAG=v0.2.5   # 本次要发的版本号（改成实际值，UpdateChecker 依赖 vX.Y.Z）
+TAG=v0.3.0   # 本次要发的版本号（改成实际值，UpdateChecker 依赖 vX.Y.Z）
 # 1. 改版本号（AndroidManifest.xml 的 versionCode / versionName），同步 README「当前版本」
 bash android/build_apk.sh
 # 2. 归档产物 + 校验和 + 版本说明
@@ -182,6 +189,10 @@ python scripts/make_release.py --tag $TAG
 - **B 站风控**：动态 feed 请求**不能带 `Origin` 头**（会触发 -352 或返回空数据）；
   `-352` 是 IP 级滑动窗口限流，靠退避 + 刷新 buvid + 本地缓存兜底，登录 Cookie 可提高配额。
   评论接口 `/x/v2/reply` 的 `ps` 必须 ≤ 20；playurl 需要 wbi 签名。
+- **B 站登录/三连是非公开接口**：2026-08 Web 登录已改版一次（SESSDATA 从返回 URL 改到
+  `Set-Cookie`），`bilibili://browser` 深链也是未文档化入口，后续仍可能变。双端已对两条
+  cookie 路径做兼容；唤起失败会自动回退到复制授权链接 / 二维码 / 手填 Cookie。但真实
+  「点确认」与大会员态高画质必须由账号本人在设备上完成，自动化只覆盖到凭证到手之前。
 - **老 WebView 兼容红线**：目标是 Android 9 / Chrome 74，前端禁用 `??`、`?.`、
   `replaceAll`、`:is()`、flex `gap`、`inset`、`clamp()`、`aspect-ratio` 等新语法。
 - **manifest 必须声明 targetSdkVersion**，否则系统按 targetSdk=1 走屏幕兼容模式，
@@ -209,6 +220,13 @@ python _test/regression.py --list     # 用例清单
 测试在横屏用 `Emulation.setDeviceMetricsOverride` 模拟视口、双指用逻辑级模拟
 （直接驱动 startPinch/movePinch）；CDP 触摸注入在 Chrome 74 内核上不可达，不要依赖。
 
+**手势模型（2026-11-11 起）**：单击画面 = 显示/隐藏浮窗，双击 = 播放/暂停。单击动作
+延后 `DBL_MS`（260ms）执行，用来确认不是双击，否则双击时浮窗会先闪一下；双击走
+`togglePlay(true)`（quiet 参数）跳过 `showChrome()`，避免「双击暂停」把刚收起的浮窗
+又弹出来。因为单点即可即时收起，`CHROME_IDLE_MS` 从 1800ms 放宽到 **4500ms**，
+自动隐藏退化为「亮着不动」的兜底。单击与双击都要在捕获阶段吞掉浏览器随后合成的
+click（`tapSynth` 时间+位置配对），否则会点到刚恢复热区的隐藏控件。
+
 两台设备同时验证时给第二台换一个本地端口即可：
 `CDP_PORT=9923 python _test/regression.py`（`cdp.py` / `cdp_eval.py` / `regression.py`
 都支持该环境变量，默认 9922；WebView 重启后 socket 名随 PID 变，要先 `pidof` 再 forward）。
@@ -216,14 +234,30 @@ python _test/regression.py --list     # 用例清单
 三张图片是否加载、三个 JS 桥以及 `/api/net/stat` 的返回值，并检查旧的
 `#setBack` / `.sheet-foot` 确实不再存在。
 
+社交模块另有三条独立验证线（都不需要真机点确认授权）：
+`_test/verify_qr_matrix.py` 把 `qr.js` 的 32 个矩阵与 Python `qrcode` 标准库逐点比对；
+`_test/verify_social_api.py` 在本机起 `server.py` 冒烟全部社交端点（凭证重定向到 `_test/out/`，自动清理）；
+`_test/verify_top_row.js` 是真机 CDP 的顶部行专项：浮窗头部一行（头像 / 昵称 / 箭头）、
+三连按钮挂在 `.ci-row` 内（标题那一行）、紧跟标题字符（间隙 ≤12px、同一水平线）、
+HUD 与标题同行且贴页签、三项信息横排一行、播放键比其它键大、
+倒放键空隙、收起箭头方向。`_test/verify_social.js` 检查左侧浮窗位置、`QRGen` 与 `VCNC` 契约、
+App 授权桥与 `/api/social/auth`、二维码默认不绘制且兜底可实绘、chrome 同进退隐藏、
+HUD 贴页签且三项同排一行、非大会员时画质按钮全禁用、三连接口返回（已登录时**不发**真实三连）。
+`_test/verify_tap.js` 验证手势语义：单击显示/隐藏浮窗（等待 `DBL_MS` 判定窗口后生效）、
+双击播停且**不**唤出浮窗（`togglePlay(true)` 静默路径）、双击后紧接单击仍能收起；
+它直接调用页面里的 `onTap`，因为 `adb shell input tap` 两次点击间隔不可控。
+
 `scripts/release_gate.py` 把上述回归与专项验收接成发布门禁，另做版本一致性、
 资源完整性、语法与 Chrome 74 红线、APK 内容/包名/标签/签名、文档链接、
-两端流量接口对齐等静态检查；清单与执行记录见 [发布门禁](RELEASE_GATE.md)。
+两端流量与社交接口对齐等静态检查；清单与执行记录见 [发布门禁](RELEASE_GATE.md)。
 
-**v0.2.5 门禁实测**：SM-S9080（S22U，端口 9922）与 SM-N9500（Note8，端口 9923）
-两台设备标准回归各 19/19，`verify_brand_net.js` 双机全绿；期间 S22U WiFi 被关导致
-首次验收 offline，`svc wifi enable` 恢复后重跑通过；Note8 熄屏 Doze 需
+**v0.3.0 门禁实测**：SM-S9080（S22U，端口 9922）与 SM-N9500（Note8，端口 9923）
+两台设备标准回归各 19/19，`verify_social.js` / `verify_top_row.js` / `verify_tap.js`
+三条专项双机全绿（含物理 `input tap` 的单击隐藏、双击暂停实测）。真机两个老坑照旧：
+S22U 曾因 WiFi 被关导致 offline，`svc wifi enable` 恢复后重跑；Note8 熄屏 Doze 需
 `KEYCODE_WAKEUP` + `KEYCODE_MENU` 亮屏解锁，否则视口 0×0 会让用例大面积假失败。
+
+> v0.2.5 的记录见 git 历史：品牌化 + 分享区 + 流量计量批次，双机 19/19 + `verify_brand_net.js` 全绿。
 
 ---
 
@@ -300,8 +334,9 @@ manifest 用 `@string/app_name` 引用而非硬编码，系统按语言自动切
 
 前端 `initNetMeter()` 每 1.2s 轮询一次，渲染两处：
 
-- 播放页左上角 `#netHud` 常驻小胶囊（不随 chrome 自动隐藏）：`↓ 当前网速 · 本次已用`；
-  `network === "mobile"` 时加 `.mobile` 变橙并写明「移动数据」
+- 播放页 `#netHud`：与标题**同一行**、靠右贴住「列表 / 设置」页签，竖排三行
+  `↓ 速率 / 本次 / 累计`（随 chrome 一起淡出）。`network === "mobile"` 时加 `.mobile`
+  变橙并写明「移动」
 - 设置页「网络流量」行：当前速度 / 本次 / 累计 / 缓存已省，附「清零」按钮与口径说明
 
 桌面 `server.py` 有同语义的纯 Python `NetMeter`（在 `http_json*`、媒体上游转发、缓存命中三处埋点），
@@ -309,4 +344,123 @@ manifest 用 `@string/app_name` 引用而非硬编码，系统按语言自动切
 
 > 仍遵守 Chrome 74 兼容红线：新增前端代码只用 `var` / `function` / `fetch().then`，
 > 不用 `??`、`?.`、`:is()`、flex `gap` 等。流量 HUD 用 `position:absolute` 而非 `inset`。
+
+### 顶部那一行怎么排的（2026-11-11 起）
+
+播放页顶行现在同时塞了四样东西：**标题 / 三连按钮 / 流量 HUD / 列表·设置页签**
+（「播放」页签在当前页隐藏，所以 `#pageNav` 实测只占 116px）。
+
+- `.chinfo` 改成 flex 行：标题块 `.ci-main`（`min-width:0` + `text-overflow:ellipsis`）
+  与三连按钮 `.ci-triple`（`social.js` 注入，`pointer-events:auto` 单独放开）。
+- 位置不写死：`feed.js` 的 `layoutTopRow()` 每次 `renderNet` 时按 `#pageNav`、
+  `#netHud` 的**实测宽度**反算 `right`（HUD = 页签宽 + 18，`.chinfo` = 再让出 HUD 宽 + 8），
+  `resize` 时重算。
+- **设备端 WebView 设了 `setMinimumFontSize(12)`**（`MainActivity`），任何 <12px 的
+  CSS 字号在真机上都按 12px 渲染——宽度必须按 12px 估算，写 9px/10px 只会让渐变失效、
+  布局算错。HUD 因此改成竖排三行（宽 ~70px）而不是一行长字符串（同样内容要 156px，
+  会把标题挤成 0 宽）。
+- 标题过长时会被省略号截断。为了让截断后仍看得出是哪一场，`ClipPlayer.render()` 在
+  **显示时**去掉开头的 `[实况录像+集锦]` 这类分类标签（副标题里已有「集锦」），
+  完整标题写进 `title` 属性；`VCNC.getState().title` 仍是原始完整标题。
+
+---
+
+## B 站账号社交模块
+
+**这是一个刻意做成「相对独立」的功能**：播放链路（双 deck / 片段调度 / 倒放 / 手势）零改动，
+只通过 `feed.js` 暴露的 `window.VCNC` 契约与它交互。契约缺失时 `social.js` 自动降级为只读，
+不会抛错；桌面调试版与 APK 共用同一份前端。
+
+| 层 | Android | 桌面 | 前端 |
+|---|---|---|---|
+| 路由（controller） | `ProxyServer.route` | `Handler.do_GET` / `do_POST` | `social.js` 的 `api()` |
+| 业务（service） | `BiliSocial.java` | `social.py` | 浮窗渲染 / 轮询状态机 |
+| 存储 | `files/social.json`（应用私有目录） | `~/.vcnc-football/social.json` | 只存画质档位、三连记录、折叠态，不存凭证 |
+| 二维码 | — | — | `qr.js`（本地编码，不联网，仅兜底） |
+| 客户端唤起 | `MainActivity.BiliBridge.biliAuth` + Manifest `<queries>` | — | `BiliBridge.biliAppInstalled()` |
+
+### 端点（两端同语义）
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| GET | `/api/social/auth` | 申请**客户端 App 授权**会话，返回 `{ok, url, key, ttl, mode:'app'}` |
+| GET | `/api/social/qrcode` | 同一会话的兼容别名 / 桌面二维码兜底，返回 `{ok, url, key, ttl}` |
+| GET | `/api/social/poll?key=…` | 轮询一次授权状态：`wait` / `scanned` / `expired` / `done`；成功时持久化凭证并返回 `me` |
+| GET | `/api/social/me[?force=1]` | `x/web-interface/nav`：账号信息与大会员判定，缓存 30s |
+| POST | `/api/social/triple` | 一键三连，body `bvid=…` |
+| POST | `/api/social/manual` | 手填 Cookie 兜底，body `cookie=…` |
+| POST | `/api/social/logout` | 只清本机凭证 |
+
+写操作一律 POST + `Origin` / `Referer` 同源校验（本地代理监听 `127.0.0.1`，第三方网页
+否则可以用跨站请求触发三连）。`ProxyServer` 为此补了 POST body 解析；`server.py` 补了 `do_POST`。
+
+### 客户端 App 授权登录（默认路径）
+
+1. 前端点「登录 / 授权」→ 自动调 `/api/social/auth`，拿到 `{ok, url, key, ttl, mode:'app'}`。
+2. `MainActivity.BiliBridge.biliAppInstalled()` 通过 Manifest `<queries>` 里声明的包名检查本机
+   B 站客户端（`tv.danmaku.bili` / HD / 国际版）。已安装则 `biliAuth(url)` 用官方
+   `bilibili://browser?url=<encoded>` 深链把授权页交给 App 内 WebView 打开。**必须
+   `setPackage`**：本应用自己也声明了 `bilibili://` intent-filter，不指定包名会弹选择器甚至自跳转。
+   真机实测打开 `tv.danmaku.bili/.ui.webview.MWebActivity`，页面含账号卡片与「确认」按钮，
+   用户点一下即可，**全程不需要相机扫码**。未安装 / 唤起失败时自动展开「其他登录方式」，
+   可复制授权链接，或用 `qr.js` 把同一 URL 画成二维码（桌面调试版默认走这一支）。
+3. 前端每 1.5s 调 `/api/social/poll`（最多 180s）；从 B 站 App 切回时 `visibilitychange`
+   立即补一次轮询。二维码与 App 授权**共用同一个 passport 会话**，poll 成功后同样拿
+   `SESSDATA` / `bili_jct`。
+4. **B 站 2026-08 起登录改版**：成功时不再把 `SESSDATA` 拼在返回 URL 上，而是由 poll
+   响应的 `Set-Cookie` 下发。双端以 Set-Cookie 为主路径，兼容旧版 crossDomain URL 参数，
+   两条都没拿到时再 GET 一次 SSO 地址。
+5. 拿到凭证后清 `RESOLVE_CACHE` / `FEED_CACHE`（否则旧的匿名 playurl 结果会被复用），
+   返回 `me`，前端 `VCNC.reload()` 保存进度后重载页面重新取流。
+
+> 不走开放平台 OAuth2：那需要申请 `client_id` / `secret`，且换回的 `access_token` 只能访问
+> 开放接口，拿不到 `SESSDATA`，三连与大会员 playurl 都用不了。本方案复用 Web 登录会话；
+> B 站 H5 授权页标题仍写着「哔哩哔哩扫码登录」，那只是固定文案，操作上无需扫码。
+
+**大会员画质**：`/api/resolve` 与 `/api/feed` 在未显式传 `cookie` 时自动使用
+`BiliSocial.userCookie()` / `social.user_cookie()`，所以登录后 playurl 自然返回
+`accept_quality` 里的高码率档位；`qn` 持久化在 `vcnc.qn.v1`，切换画质走
+`VCNC.setQuality(qn)` → 保存进度 → reload。媒体缓存 key 含 `qn`，不同档位不会串流。
+前端仅在 `me.vip === true`（`nav` 的 `vipStatus===1 && vipType>0`）时启用画质按钮。
+> 真机游客态实测：请求 `qn=80`，B 站实际只给 `quality=32`（480P）——这正是画质门禁必须绑定登录态的原因。
+
+**三连**：`POST https://api.bilibili.com/x/web-interface/archive/like/triple`，
+form `bvid` + `csrf`（取 Cookie 里的 `bili_jct`），Cookie 必须含 `buvid3`（否则触发风控）。
+`bvid` 来自 `VCNC.getState()`，即**当前正在播放的那场 VCNC 视频**。前端按 bvid 记录「已三连」，
+避免重复点击；`-101` / `-111` 映射为「登录过期，请重新授权登录」，`65006` 映射为「已经三连过啦」。
+
+### 安全边界
+
+- 凭证只落应用私有目录 / 用户目录，**不下发前端、不写日志**（日志只打印状态）、不入库；
+  所有 API 响应都不含 `SESSDATA` / `bili_jct` 原文。
+- 登出不调用 B 站 `/web/logout`，避免踢掉用户其它设备。
+- 三连 / 登出 / 手填走 POST + 同源校验；`url` / `key` 等参数在后端做白名单校验
+  （`key` 必须匹配 `[A-Za-z0-9_-]{16,64}`，`bvid` 必须匹配 `BV[0-9A-Za-z]{10}`）。
+- 头像直接由 `<img referrerpolicy="no-referrer">` 加载，失败回退成昵称首字，不新增二进制代理路由。
+
+### 为什么自研 QR 编码器
+
+APK 离线运行，WebView 不能依赖 CDN；B 站登录 URL 每次都不同（实测 145 字节），
+也不能预生成图片。`static/qr.js` 只实现登录场景需要的子集：
+**byte mode / ECC M / version 1~10**（最长 213 字节，145 字节落在 version 8），
+GF(256) Reed–Solomon、块交织、功能图形、8 种掩模自动评分，全部 ES5 + Canvas 2D。
+`_test/verify_qr_matrix.py` 把 4 组文本 × 8 种掩模（共 32 个矩阵）与 Python
+`qrcode` 标准库逐点比对，实测 **0 差异**；`_test/verify_social.js` 在真机上验证
+canvas 实际渲染出 212×212、约 1.9 万深色像素的可扫图形。
+
+### 验证
+
+```bash
+python _test/verify_qr_matrix.py     # QR 矩阵 32/32 与标准库一致（需 node + Python qrcode 库，仅测试用）
+python _test/verify_social_api.py    # 桌面端点冒烟：登录/轮询/三连/跨站/手填/登出，凭证重定向到 _test/out/
+# 真机（CDP 转发就绪后）：
+CDP_PORT=9923 python _test/cdp_eval.py _test/verify_social.js
+```
+
+`scripts/release_gate.py` 已把 3 个新 JS 纳入 `node --check` 与 Chrome 74 红线、
+把 `social.py` 与两个新验证脚本纳入 AST 编译、把 10 个 `assets/www` 文件纳入 APK 内容检查，
+双机门禁另加 `_test/verify_social.js` 专项验收（浮窗位置、二维码渲染、画质门禁、三连接口）。
+
+**未覆盖**：真实扫码确认、大会员态下的高画质切换与真实三连，必须由账号本人在设备上完成；
+自动化只验证到「凭证到手之前」的全部链路与未登录态门禁。
 

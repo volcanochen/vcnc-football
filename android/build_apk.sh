@@ -32,6 +32,10 @@ cp -f "$STATIC/index.html" "$WWW/index.html"
 cp -f "$STATIC/feed.html"  "$WWW/feed.html"
 cp -f "$STATIC/feed.js"    "$WWW/feed.js"
 cp -f "$STATIC/feed.css"   "$WWW/feed.css"
+# 社交功能：二维码编码器 + 左侧账号浮窗（独立模块，不侵入 feed.js）
+cp -f "$STATIC/qr.js"      "$WWW/qr.js"
+cp -f "$STATIC/social.js"  "$WWW/social.js"
+cp -f "$STATIC/social.css" "$WWW/social.css"
 # 品牌资源：设置页「分享与支持」要用到的图标与两张二维码
 cp -f "$STATIC/app-icon.png"  "$WWW/app-icon.png"
 cp -f "$STATIC/share-qr.png"  "$WWW/share-qr.png"

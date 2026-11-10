@@ -46,6 +46,8 @@ public class ProxyServer extends Thread {
     public ProxyServer(Context ctx) {
         this.ctx = ctx.getApplicationContext();
         this.cache = MediaCache.get(this.ctx);
+        // 社交模块凭证读回：放在这里 init，MainActivity / 更新流程都不必感知
+        BiliSocial.init(this.ctx);
     }
 
     /** 进程级单例：首个调用者启动，之后复用（端口不变） */
@@ -143,8 +145,25 @@ public class ProxyServer extends Thread {
                 if (c > 0) headers.put(h.substring(0, c).trim(), h.substring(c + 1).trim());
             }
             OutputStream os = s.getOutputStream();
-            if ("GET".equals(method) || "HEAD".equals(method)) {
-                route(path, query, headers, os, "HEAD".equals(method));
+            String postBody = "";
+            if ("POST".equals(method)) {
+                int len = 0;
+                try { len = Integer.parseInt(header(headers, "Content-Length")); } catch (Exception ignore) {}
+                if (len > 0 && len <= 64 * 1024) {
+                    char[] cb = new char[Math.min(len, 4096)];
+                    StringBuilder sb = new StringBuilder();
+                    int left = len;
+                    while (left > 0) {
+                        int n = br.read(cb, 0, Math.min(left, cb.length));
+                        if (n < 0) break;
+                        sb.append(cb, 0, n);
+                        left -= n;
+                    }
+                    postBody = sb.toString();
+                }
+            }
+            if ("GET".equals(method) || "HEAD".equals(method) || "POST".equals(method)) {
+                route(method, path, query, postBody, headers, os, "HEAD".equals(method));
             }
             os.flush();
         } catch (Exception e) {
@@ -168,7 +187,33 @@ public class ProxyServer extends Thread {
         return m;
     }
 
-    private void route(String path, String query, Map<String, String> headers, OutputStream os, boolean head)
+    /** HTTP 头名大小写不敏感查找 */
+    private static String header(Map<String, String> headers, String name) {
+        String v = headers.get(name);
+        if (v != null) return v.trim();
+        for (Map.Entry<String, String> e : headers.entrySet())
+            if (e.getKey().equalsIgnoreCase(name)) return e.getValue().trim();
+        return "";
+    }
+
+    /**
+     * 写操作同源校验：本地代理监听 127.0.0.1，任何本机浏览器里的第三方页面都能
+     * 对它发请求。三连 / 登出会动用户账号，必须挡掉明显跨域的 Origin / Referer。
+     * 空头（curl、应用内不带头的老调用）放行，保持可测试性。
+     */
+    private static boolean sameOrigin(Map<String, String> headers) {
+        String[] checks = { header(headers, "Origin"), header(headers, "Referer") };
+        for (String s : checks) {
+            if (s.isEmpty() || "null".equalsIgnoreCase(s)) continue;
+            String host = s.replaceFirst("^[a-zA-Z][a-zA-Z0-9+.-]*://", "").split("[/:?#]", 2)[0];
+            host = host.replaceAll(":\\d+$", "");
+            if (!("127.0.0.1".equals(host) || "localhost".equals(host))) return false;
+        }
+        return true;
+    }
+
+    private void route(String method, String path, String query, String postBody,
+                       Map<String, String> headers, OutputStream os, boolean head)
             throws IOException {
         if ("/api/ping".equals(path)) {
             sendJson(os, 200, "{\"ok\":true,\"t\":" + System.currentTimeMillis() + "}");
@@ -194,12 +239,47 @@ public class ProxyServer extends Thread {
             sendCacheStat(os);
         } else if ("/api/cache/prefetch".equals(path)) {
             handlePrefetch(query, os);
+        } else if ("/api/social/auth".equals(path)) {
+            // B 站客户端 App 授权登录：申请授权页 URL + 轮询 key（不含任何凭证）
+            sendJson(os, 200, BiliSocial.auth().toString());
+        } else if ("/api/social/qrcode".equals(path)) {
+            // 兼容别名：桌面端把同一会话的 URL 渲染成二维码
+            sendJson(os, 200, BiliSocial.qrcode().toString());
+        } else if ("/api/social/poll".equals(path)) {
+            Map<String, String> q = parseQuery(query);
+            sendJson(os, 200, BiliSocial.poll(q.getOrDefault("key", "")).toString());
+        } else if ("/api/social/me".equals(path)) {
+            Map<String, String> q = parseQuery(query);
+            sendJson(os, 200, BiliSocial.me("1".equals(q.get("force"))).toString());
+        } else if ("/api/social/logout".equals(path)) {
+            if (!sameOrigin(headers)) {
+                sendJson(os, 403, "{\"ok\":false,\"error\":\"拒绝跨站请求\"}");
+                return;
+            }
+            sendJson(os, 200, BiliSocial.logout().toString());
+        } else if ("/api/social/manual".equals(path)) {
+            if (!"POST".equals(method) || !sameOrigin(headers)) {
+                sendJson(os, 403, "{\"ok\":false,\"error\":\"拒绝跨站请求\"}");
+                return;
+            }
+            Map<String, String> q = parseQuery(postBody);
+            sendJson(os, 200, BiliSocial.setManualCookie(q.getOrDefault("cookie", "")).toString());
+        } else if ("/api/social/triple".equals(path)) {
+            if (!"POST".equals(method) || !sameOrigin(headers)) {
+                sendJson(os, 403, "{\"ok\":false,\"error\":\"三连只接受本应用发起的 POST 请求\"}");
+                return;
+            }
+            Map<String, String> q = parseQuery(postBody);
+            sendJson(os, 200, BiliSocial.triple(q.getOrDefault("bvid", "")).toString());
         } else if ("/api/resolve".equals(path)) {
             Map<String, String> q = parseQuery(query);
             String raw = q.getOrDefault("url", "");
             int page = parseInt(q.get("p"), 1);
             int qn = parseInt(q.get("qn"), 80);
+            // 显式传 cookie（设置页手填）优先；否则自动套用扫码登录的凭证，
+            // 这样 playurl 才会返回大会员可用的高画质档位。
             String cookie = q.getOrDefault("cookie", "");
+            if (cookie.trim().isEmpty()) cookie = BiliSocial.userCookie();
             try {
                 if (raw.trim().isEmpty()) throw new RuntimeException("请填写视频链接或 BV 号");
                 JSONObject j = resolveWithRetry(raw, page, qn, cookie);
@@ -212,6 +292,7 @@ public class ProxyServer extends Thread {
             Map<String, String> q = parseQuery(query);
             String offset = q.getOrDefault("offset", "");
             String cookie = q.getOrDefault("cookie", "");
+            if (cookie.trim().isEmpty()) cookie = BiliSocial.userCookie();
             try {
                 JSONObject j = BiliApi.fetchSpaceFeed(offset, cookie);
                 sendJson(os, 200, j.toString());

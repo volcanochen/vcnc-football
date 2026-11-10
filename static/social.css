@@ -1,0 +1,338 @@
+/* =============================================================
+   social.css · B 站账号社交浮窗（播放页左侧）
+   -------------------------------------------------------------
+   与 feed.css 同一套设计语言：半透明深色卡片、细边、右侧集锦浮窗的镜像。
+   Chrome 74 兼容：不用 inset / flex gap / clamp() / aspect-ratio / :is()。
+   ============================================================= */
+
+/* ---------- 左侧浮窗 ---------- */
+.soc-float {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: 96px;               /* 避开标题行（三连 / 流量都在上面那行） */
+  width: 142px;            /* 两列画质要放得下加粗的「1080P60」（设备最小字号 12px） */
+  max-height: 56%;
+  z-index: 48;
+  flex-direction: column;
+  background: rgba(8, 12, 17, .76);
+  border: 1px solid rgba(255, 255, 255, .13);
+  border-left: none;
+  border-radius: 0 10px 10px 0;
+  color: #fff;
+  overflow: hidden;
+  touch-action: none;      /* 不让浏览器把纵向手势接管成页面滚动 */
+}
+body[data-page="1"] .soc-float { display: flex; }
+
+/* 与 #pageNav / #segFloat / 控制条同进退：chrome 自动隐藏时，账号浮窗和
+   登录弹层也一起淡出。弹层内的点击/输入由 feed.js 的 keepChrome 保活，
+   不会被计时器打断；隐藏后点一下屏幕即可唤回。 */
+.soc-float, .soc-modal { transition: opacity .3s ease; }
+body.chrome-off .soc-float,
+body.chrome-off .soc-modal { opacity: 0; pointer-events: none; }
+
+.soc-float.fold { width: 32px; max-height: none; border-radius: 0 8px 8px 0; }
+.soc-float.fold .soc-body { display: none; }
+.soc-float.fold .soc-head {
+  height: 34px;
+  padding: 0 3px;
+  border-bottom: none;
+  justify-content: center;
+}
+.soc-float.fold .soc-av,
+.soc-float.fold .soc-nm { display: none; }
+.soc-float.fold .soc-fold { width: 26px; height: 30px; margin: 0; background: transparent; font-size: 16px; }
+
+/* 头部一行：头像 + 用户名 + 收起箭头 */
+.soc-head {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  flex: none;
+  padding: 0 4px 0 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, .09);
+}
+.soc-av {
+  position: relative;
+  flex: none;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: rgba(255, 255, 255, .12);
+  border: 1px solid rgba(255, 255, 255, .18);
+  text-align: center;
+}
+.soc-av.vip { border-color: #fb7299; }
+.soc-av-i {
+  display: none;
+  position: absolute;
+  left: 0; top: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+  z-index: 2;
+}
+.soc-av-t {
+  position: relative;
+  z-index: 1;
+  font-size: 11px;
+  line-height: 18px;
+  color: rgba(255, 255, 255, .72);
+}
+.soc-nm {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.soc-nm.guest { color: rgba(255, 255, 255, .6); font-weight: 400; cursor: pointer; }
+/* 收起箭头：展开时「‹」朝左（点它向左收起），收起后「›」 */
+.soc-fold {
+  flex: none;
+  width: 22px; height: 22px;
+  margin-left: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .08);
+  color: rgba(255, 255, 255, .75);
+  font-size: 14px;
+  line-height: 1;
+  font-family: inherit;
+  cursor: pointer;
+}
+.soc-body { padding: 8px; overflow-y: auto; }
+
+/* ---------- 画质（分区标题与三连按钮都已移出，保持极简） ---------- */
+
+.soc-btn {
+  display: block;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 6px;
+  border: 1px solid rgba(0, 174, 236, .55);
+  border-radius: 7px;
+  background: rgba(0, 174, 236, .22);
+  color: #fff;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: center;
+}
+.soc-btn.primary { background: rgba(0, 174, 236, .78); border-color: transparent; font-weight: 600; }
+.soc-btn[disabled] { opacity: .4; cursor: default; }
+.soc-btn + .soc-btn { margin-top: 6px; }
+
+/* 画质按钮：两列，用 margin 制造间距（不用 flex gap） */
+.soc-qs { display: flex; flex-wrap: wrap; }
+.soc-q {
+  width: calc(50% - 3px);
+  min-height: 26px;
+  margin: 0 6px 5px 0;
+  padding: 3px 2px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .06);
+  color: rgba(255, 255, 255, .78);
+  font-size: 10px;
+  font-family: inherit;
+  line-height: 1.3;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.soc-q:nth-child(2n) { margin-right: 0; }
+.soc-q.on { background: #00aeec; border-color: #00aeec; color: #fff; font-weight: 600; }
+.soc-q[disabled] { opacity: .32; cursor: default; }
+.soc-q-empty { font-size: 10px; color: rgba(255, 255, 255, .42); line-height: 1.5; }
+
+.soc-state { margin-top: 5px; font-size: 10px; line-height: 1.4; color: rgba(255, 255, 255, .6); }
+.soc-state.ok { color: #7fe0a8; }
+.soc-state.bad { color: #ff9c9c; }
+
+/* ---------- 标题行三连按钮（紧跟标题文字，由 social.js 注入到 .chinfo） ---------- */
+.ci-triple {
+  flex: none;
+  align-self: center;
+  margin-left: 6px;
+  height: 23px;
+  padding: 0 7px;
+  border: 1px solid rgba(255, 255, 255, .22);
+  border-radius: 7px;
+  background: rgba(8, 12, 17, .62);
+  color: rgba(255, 255, 255, .92);
+  font-size: 11px;
+  line-height: 21px;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;      /* .chinfo 本身 pointer-events:none，这里单独放开 */
+  -webkit-tap-highlight-color: transparent;
+  transition: background .2s ease, color .2s ease, opacity .3s ease;
+}
+/* 未登录：灰掉，但可点（点了进登录流程） */
+.ci-triple.dim {
+  color: rgba(255, 255, 255, .38);
+  border-color: rgba(255, 255, 255, .12);
+  background: rgba(8, 12, 17, .38);
+}
+/* 已登录：激活态 */
+.ci-triple.on {
+  background: rgba(251, 114, 153, .92);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+}
+/* 已三连：粉色描边弱化，表示完成 */
+.ci-triple.done {
+  background: rgba(251, 114, 153, .18);
+  border-color: rgba(251, 114, 153, .5);
+  color: #fb7299;
+}
+.ci-triple.busy { opacity: .7; }
+body.chrome-off .ci-triple { pointer-events: none; }
+
+/* ---------- 登录弹层 ---------- */
+.soc-modal {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, .82);
+  touch-action: none;
+}
+.soc-modal[hidden] { display: none; }
+.soc-card {
+  width: 268px;
+  max-height: 92%;
+  overflow-y: auto;
+  padding: 14px;
+  border-radius: 12px;
+  background: #151a21;
+  border: 1px solid rgba(255, 255, 255, .14);
+  color: #fff;
+  text-align: center;
+}
+.soc-card-head {
+  display: flex;
+  align-items: center;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.soc-x {
+  margin-left: auto;
+  width: 26px; height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .08);
+  color: rgba(255, 255, 255, .75);
+  font-size: 16px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.soc-qr-wrap {
+  position: relative;
+  display: inline-block;
+  padding: 6px;
+  background: #fff;
+  border-radius: 8px;
+  line-height: 0;
+}
+.soc-qr-wrap canvas { display: block; image-rendering: pixelated; }
+.soc-qr-veil {
+  position: absolute;
+  top: 6px; left: 6px; right: 6px; bottom: 6px;
+  background: rgba(255, 255, 255, .9);
+  color: #333;
+  font-size: 12px;
+  line-height: 1.5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+.soc-qr-veil[hidden] { display: none; }
+.soc-status { margin-top: 10px; font-size: 12px; color: #cfd8e0; min-height: 18px; line-height: 1.5; }
+.soc-status.ok { color: #7fe0a8; }
+.soc-status.bad { color: #ff9c9c; }
+.soc-tips { margin-top: 6px; font-size: 10px; line-height: 1.55; color: rgba(255, 255, 255, .48); }
+.soc-refresh {
+  margin-top: 10px;
+  padding: 5px 12px;
+  border: 1px solid rgba(0, 174, 236, .6);
+  border-radius: 7px;
+  background: rgba(0, 174, 236, .18);
+  color: #fff;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+/* App 授权主路径：默认只看到 Logo / 说明 / 主按钮，二维码藏在折叠区 */
+.soc-app-logo {
+  display: inline-block;
+  margin: 2px 0 6px;
+  padding: 7px 12px;
+  border-radius: 10px;
+  background: #fb7299;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: .5px;
+}
+.soc-app-lead { font-size: 12px; color: rgba(255, 255, 255, .78); }
+.soc-btn.primary.big { min-height: 38px; margin-top: 8px; font-size: 13px; }
+.soc-alt[hidden] { display: none; }
+.soc-alt { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, .1); }
+.soc-alt-row { display: flex; margin-bottom: 8px; }
+.soc-alt-row button {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  margin-right: 5px;
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .08);
+  color: #fff;
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.soc-alt-row button:last-child { margin-right: 0; }
+.soc-alt .soc-qr-wrap { margin-top: 4px; }
+
+.soc-manual { margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, .1); text-align: left; }
+.soc-manual-t { font-size: 10px; color: rgba(255, 255, 255, .5); line-height: 1.5; margin-bottom: 6px; }
+.soc-manual-row { display: flex; }
+.soc-manual input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, .3);
+  color: #fff;
+  font-size: 10px;
+  font-family: inherit;
+}
+.soc-manual button {
+  flex: none;
+  margin-left: 6px;
+  padding: 0 10px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .16);
+  color: #fff;
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+}

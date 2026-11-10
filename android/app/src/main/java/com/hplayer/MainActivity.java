@@ -835,6 +835,59 @@ return true;
                 Toast.makeText(MainActivity.this, "打不开链接", Toast.LENGTH_SHORT).show();
             }
         }
+        /**
+         * 本机是否装了 B 站客户端（「用 B 站 App 授权登录」的前提）。
+         * targetSdk 34 必须在 Manifest 的 <queries> 里声明这些包名，否则查不到。
+         */
+        @JavascriptInterface
+        public boolean biliAppInstalled() { return biliClientPackage() != null; }
+
+        /**
+         * 把 B 站授权页交给客户端 App 内打开，用户点「确认」即完成授权。
+         * 走的是 B 站官方声明的 bilibili://browser deep link（真机实测打开
+         * .ui.webview.MWebActivity，页面含账号卡片 + 确认按钮），全程不需要扫码。
+         * 返回 ok / ok-https / noapp / badurl / failed，供前端给出对应提示。
+         */
+        @JavascriptInterface
+        public String biliAuth(String url) {
+            String pkg = biliClientPackage();
+            if (pkg == null) return "noapp";
+            if (url == null || !(url.startsWith("https://account.bilibili.com/")
+                    || url.startsWith("https://passport.bilibili.com/"))) return "badurl";
+            String enc = Uri.encode(url);
+            // 必须 setPackage：本应用也声明了 bilibili scheme，不带包名会弹选择器甚至自跳转
+            String[] links = {
+                    "bilibili://browser?url=" + enc,
+                    "bilibili://browser/" + enc
+            };
+            for (String link : links) {
+                try {
+                    Intent it = new Intent(Intent.ACTION_VIEW, Uri.parse(link));
+                    it.setPackage(pkg);
+                    it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    MainActivity.this.startActivity(it);
+                    return "ok";
+                } catch (Exception ignore) { }
+            }
+            // 兜底：部分客户端版本直接接 https App Link
+            try {
+                Intent it = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                it.setPackage(pkg);
+                it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                MainActivity.this.startActivity(it);
+                return "ok-https";
+            } catch (Exception e) { return "failed"; }
+        }
+
+        private String biliClientPackage() {
+            PackageManager pm = MainActivity.this.getPackageManager();
+            String[] pkgs = {"tv.danmaku.bili", "tv.danmaku.bilibilihd", "com.bilibili.app.in"};
+            for (String p : pkgs) {
+                try { pm.getPackageInfo(p, 0); return p; } catch (Exception ignore) { }
+            }
+            return null;
+        }
+
         @JavascriptInterface
         public void shareText(String text) {
             try {

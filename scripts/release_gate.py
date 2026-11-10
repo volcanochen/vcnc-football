@@ -175,13 +175,18 @@ def main():
 
     # --- 源码语法与兼容红线 ---
     def c_js():
-        rc, out = run(["node", "--check", "static/feed.js"])
-        return rc == 0, "node --check feed.js " + (out.strip() or "OK")
+        bad = []
+        for f in ("static/feed.js", "static/qr.js", "static/social.js"):
+            rc, out = run(["node", "--check", f])
+            if rc != 0:
+                bad.append(f + ": " + out.strip()[:120])
+        return not bad, "node --check 3 个 JS 文件" if not bad else "; ".join(bad)
 
     def c_py():
-        files = ["server.py", "scripts/make_release.py", "scripts/gen_brand_assets.py",
+        files = ["server.py", "social.py", "scripts/make_release.py", "scripts/gen_brand_assets.py",
                  "scripts/gen_share_assets.py", "scripts/release_gate.py",
-                 "_test/regression.py", "_test/cdp_eval.py"]
+                 "_test/regression.py", "_test/cdp_eval.py",
+                 "_test/verify_qr_matrix.py", "_test/verify_social_api.py"]
         bad = []
         for f in files:
             try:
@@ -191,8 +196,8 @@ def main():
         return not bad, "Python AST 编译 %d 个文件" % len(files) if not bad else "语法错误 " + ",".join(bad)
 
     def c_redline():
-        js = read(rel("static/feed.js"))
-        css = read(rel("static/feed.css"))
+        js = "\n".join(read(rel("static", f)) for f in ("feed.js", "qr.js", "social.js"))
+        css = "\n".join(read(rel("static", f)) for f in ("feed.css", "social.css"))
         # 先剥掉注释，避免文档性文字误报
         js_n = re.sub(r"/\*.*?\*/|//[^\n]*", "", js, flags=re.S)
         css_n = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
@@ -207,17 +212,18 @@ def main():
         hits = ["%s×%d" % (label, len(re.findall(pat, txt))) for txt, pat, label in rules if re.search(pat, txt)]
         return not hits, "Chrome 74 兼容红线 0 命中" if not hits else "命中 " + ", ".join(hits)
 
-    def c_html_imgs():
+    def c_html_refs():
         html = read(rel("static/feed.html"))
-        srcs = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html)
-        miss = [s for s in srcs if not s.startswith(("http", "data:"))
+        # img/script/link 的本地引用都要真实存在（社交模块新增 3 个静态文件）
+        refs = re.findall(r'(?:src|href)=["\']([^"\']+)["\']', html)
+        miss = [s for s in refs if not s.startswith(("http", "data:"))
                 and not os.path.isfile(rel("static", s))]
-        return not miss, "%d 张本地图片均存在" % len(srcs) if not miss else "缺 " + ",".join(miss)
+        return not miss, "%d 个静态引用均存在" % len(refs) if not miss else "缺 " + ",".join(miss)
 
     check("JS 语法", c_js)
     check("Python 语法", c_py)
     check("Chrome 74 兼容红线", c_redline)
-    check("HTML 图片引用", c_html_imgs)
+    check("HTML 静态引用", c_html_refs)
 
     # --- 品牌与多语言资源 ---
     def c_icons():
@@ -247,8 +253,9 @@ def main():
         sh = read(rel("android/build_apk.sh"))
         bat = read(rel("android/build_apk.bat"))
         ok = all(("static/" + f in sh or f in sh) and f in bat
-                 for f in ("app-icon.png", "share-qr.png", "donate-qr.png"))
-        return ok, "两个构建脚本都复制 3 张 PNG"
+                 for f in ("app-icon.png", "share-qr.png", "donate-qr.png",
+                           "qr.js", "social.js", "social.css"))
+        return ok, "两个构建脚本都复制 3 张 PNG + 社交模块 3 个文件"
 
     check("图标 / 二维码资源", c_icons)
     check("中英文名称资源", c_labels)
@@ -257,11 +264,12 @@ def main():
     # --- APK 内容与签名 ---
     def c_apk_assets():
         want = ["assets/www/" + f for f in ("index.html", "feed.html", "feed.js", "feed.css",
+                                            "qr.js", "social.js", "social.css",
                                             "app-icon.png", "share-qr.png", "donate-qr.png")]
         with zipfile.ZipFile(APK) as z:
             names = set(z.namelist())
         miss = [w for w in want if w not in names]
-        return not miss, "assets/www 7 个文件齐全" if not miss else "缺 " + ",".join(miss)
+        return not miss, "assets/www %d 个文件齐全" % len(want) if not miss else "缺 " + ",".join(miss)
 
     def c_badging():
         if not os.path.isfile(AAPT2):
@@ -311,15 +319,56 @@ def main():
         java = read(rel("android/app/src/main/java/com/hplayer/ProxyServer.java"))
         py = read(rel("server.py"))
         html = read(rel("static/feed.html"))
-        pairs = [("/api/net/stat", java, py), ("/api/net/reset", java, py)]
+        routes = ("/api/net/stat", "/api/net/reset",
+                  "/api/social/auth", "/api/social/qrcode", "/api/social/poll",
+                  "/api/social/me", "/api/social/triple", "/api/social/logout",
+                  "/api/social/manual")
+        pairs = [(r, java, py) for r in routes]
         bad = [r for r, a, b in pairs if r not in a or r not in b]
         extra = [x for x in ("netHud", "netStat", "netReset", "setBackTop")
                  if x not in html]
-        return not bad and not extra, "两端流量接口 + 前端 4 个控件齐全" if not (bad or extra) else \
+        return not bad and not extra, "两端流量+社交接口对齐 + 前端 4 个控件齐全" if not (bad or extra) else \
             "缺 " + ",".join(bad + extra)
 
+    def c_social_files():
+        want = ("social.py", "static/qr.js", "static/social.js", "static/social.css",
+                "android/app/src/main/java/com/hplayer/BiliSocial.java")
+        miss = [f for f in want if not os.path.isfile(rel(f))]
+        return not miss, "社交模块 5 个文件齐全" if not miss else "缺 " + ",".join(miss)
+
+    def c_app_auth():
+        """App 授权主路径：桥接、包可见性、深链、默认不显示二维码。"""
+        java = read(rel("android/app/src/main/java/com/hplayer/MainActivity.java"))
+        manifest = read(rel("android/app/src/main/AndroidManifest.xml"))
+        js = read(rel("static/social.js"))
+        css = read(rel("static/feed.css"))
+        feedjs = read(rel("static/feed.js"))
+        want = {
+            "JS 桥检测客户端": "biliAppInstalled" in java,
+            "JS 桥唤起授权": "bilibili://browser?url=" in java and "setPackage(pkg)" in java,
+            "包可见性 queries": "<queries>" in manifest and "tv.danmaku.bili" in manifest,
+            "默认 App 授权端点": "'/api/social/auth'" in js,
+            "二维码折叠兜底": "id=\"socAlt\" hidden" in js or "'socAlt' hidden" in js,
+            "浮窗随 chrome 隐藏": "body.chrome-off .soc-modal" in read(rel("static/social.css")),
+            "HUD 与标题同一行靠右": bool(re.search(r"\.net-hud\s*\{[^}]*top:\s*10px[^}]*right:", css))
+                                     and "layoutTopRow" in feedjs,
+            "HUD 三项横排一行": ".hud-l3" in css and "累计" in feedjs
+                               and re.search(r"\.net-hud \.hud-l2\s*::before", css),
+            "三连按钮在标题行": ".ci-triple" in read(rel("static/social.css"))
+                                and "renderTripleTop" in js,
+            # 单击即可即时收起后，自动隐藏放宽到 4500ms（原 1800ms），下限挡住误删
+            "隐藏等待时长合理": bool(re.search(r"CHROME_IDLE_MS\s*=\s*(\d+)", feedjs))
+                              and 2000 <= int(re.search(r"CHROME_IDLE_MS\s*=\s*(\d+)", feedjs).group(1)) <= 8000,
+            "单击显隐/双击播停": "DBL_MS" in feedjs and "toggleChrome" in feedjs
+                               and "togglePlay(true)" in feedjs,
+        }
+        bad = [k for k, v in want.items() if not v]
+        return not bad, "App 授权主路径 %d 项齐全" % len(want) if not bad else "缺 " + ",".join(bad)
+
     check("文档相对链接", c_links)
-    check("流量接口两端对齐", c_api_parity)
+    check("流量 / 社交接口两端对齐", c_api_parity)
+    check("社交模块文件", c_social_files)
+    check("App 授权主路径", c_app_auth)
 
     # --- 真机回归（可选） ---
     if args.devices:
@@ -363,8 +412,81 @@ def main():
                     bad.append("JS 桥")
                 return not bad, "%s 品牌/分享/流量全绿" % s if not bad else "%s 缺 " % s + ",".join(bad)
 
+            def c_social(s=serial, p=port, e=env):
+                rc, out = run([sys.executable, "_test/cdp_eval.py", "_test/verify_social.js"],
+                              env=e, timeout=180)
+                try:
+                    j = json.loads(out[out.index("{"):])
+                except Exception:
+                    return False, "%s 返回不是 JSON: %s" % (s, out.strip()[-160:])
+                bad = []
+                for k in ("qrgen", "vcnc", "socialModule", "modalPresent"):
+                    if not j.get(k):
+                        bad.append(k)
+                fl = j.get("float") or {}
+                if not fl.get("present") or fl.get("display") != "flex" or fl.get("left") != 0:
+                    bad.append("左侧浮窗")
+                if not (j.get("qrcode") or {}).get("ok") or not (j.get("canvas") or {}).get("rendered"):
+                    bad.append("二维码兜底渲染")
+                au = j.get("auth") or {}
+                if not au.get("ok") or au.get("mode") != "app":
+                    bad.append("App 授权端点")
+                brd = j.get("bridge") or {}
+                if not brd.get("present") or not brd.get("hasAuth"):
+                    bad.append("客户端唤起桥")
+                lu = j.get("loginUI") or {}
+                if not lu.get("launch") or not lu.get("altHidden") or lu.get("defaultQrDrawn"):
+                    bad.append("默认 App 授权 UI")
+                co = j.get("chromeOff") or {}
+                if co.get("floatOpacity") != "0" or co.get("modalOpacity") != "0":
+                    bad.append("登录界面同进退隐藏")
+                nh = j.get("netHud") or {}
+                # 顶行排布：HUD 贴「列表/设置」左侧（间隙 0~20px），三项信息横排一行
+                if not (nh.get("gapToNav") is not None and 0 <= nh.get("gapToNav") <= 20):
+                    bad.append("流量 HUD 贴页签")
+                if nh.get("lines") != 3 or nh.get("textRows") != 1:
+                    bad.append("流量信息不在同一行")
+                if "本次" not in (j.get("netHudText") or "") or "累计" not in (j.get("netHudText") or ""):
+                    bad.append("流量信息被精简")
+                # 三连按钮在标题行，且处于三态之一：dim 未登录 / on 可点 / done 已三连
+                # （旧断言只接受 dim，已登录且该视频点过的设备会误报）
+                if not (j.get("tripleButton") and
+                        any(k in (j.get("tripleCls") or "") for k in ("dim", "on", "done"))):
+                    bad.append("三连按钮不在标题行/状态异常")
+                if not (2000 <= (j.get("chromeIdleMs") or 0) <= 8000):
+                    bad.append("隐藏等待时长")
+                if not (150 <= (j.get("dblMs") or 0) <= 400):
+                    bad.append("双击判定窗口")
+                if not (j.get("state") or {}).get("bvid") or (j.get("qualityButtons") or 0) < 1:
+                    bad.append("画质契约")
+                # 非大会员（含未登录）时画质必须全部禁用
+                if not (j.get("me") or {}).get("vip") and \
+                        j.get("qualityDisabled") != j.get("qualityButtons"):
+                    bad.append("大会员画质门禁")
+                ta = j.get("tripleApi") or {}
+                if "ok" not in ta:
+                    bad.append("三连接口无响应")
+                elif not ta.get("ok") and not ta.get("needLogin"):
+                    bad.append("三连接口异常:" + str(ta.get("error", ""))[:40])
+                return not bad, "%s 社交模块全绿" % s if not bad else "%s 缺 " % s + ",".join(bad)
+
+            def c_tap(s=serial, p=port, e=env):
+                rc, out = run([sys.executable, "_test/cdp_eval.py", "_test/verify_tap.js"],
+                              env=e, timeout=240)
+                try:
+                    j = json.loads(out[out.index("{"):])
+                except Exception:
+                    return False, "%s 返回不是 JSON: %s" % (s, out.strip()[-160:])
+                if j.get("pass") is True:
+                    return True, "%s 单击显隐/双击播停全绿" % s
+                v = j.get("verdict") or {}
+                bad = [k for k in v if not v[k]]
+                return False, "%s 手势未过: %s" % (s, ",".join(bad) or "无 verdict")
+
             check("回归 %s" % serial, c_reg)
             check("专项验收 %s" % serial, c_probe)
+            check("社交验收 %s" % serial, c_social)
+            check("手势验收 %s" % serial, c_tap)
 
     n_fail = sum(1 for _, ok, _ in RESULTS if not ok)
     print("=" * 62)

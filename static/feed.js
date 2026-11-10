@@ -146,7 +146,14 @@ var SET_KEY = 'vcnc.settings.v1';
 var POS_KEY = 'vcnc.pos.v1';
 var COOKIE_KEY = 'vcnc.cookie.v1';
 var FEED_CACHE_KEY = 'vcnc.feedcache.v1';
-var QN = 80;              // 1080P
+var QN_KEY = 'vcnc.qn.v1';
+/* 画质档位跨启动保持：默认 1080P；大会员可在左侧账号浮窗里切换，
+   切换会保存进度并重载（不同 qn 的媒体缓存 key 天然隔离，不会串流）。 */
+function readQn() {
+  var v = parseInt(safeGet(QN_KEY), 10);
+  return (v >= 6 && v <= 127) ? v : 80;
+}
+var QN = readQn();
 var LEAD = 0.35;          // 段末预热提前量
 var PAD_MIN = 0, PAD_MAX = 15, PAD_STEP = 0.5;
 
@@ -320,7 +327,9 @@ var CLIP_HTML =
     '</div>' +
     '<div class="veil"><div class="veil-spin"></div><div class="veil-text"></div><button class="veil-retry" type="button" hidden>重试</button></div>' +
     '<div class="chrome">' +
-      '<div class="chinfo"><div class="ctitle"></div><div class="csub"></div></div>' +
+      // 标题行：左侧标题/副标题（过长省略），三连按钮由 social.js 注入到 .ci-row 里、
+      // 紧跟在标题字符后面（不能挂在 .chinfo 上，否则会被更长的副标题顶到右边）
+      '<div class="chinfo"><div class="ci-main"><div class="ci-row"><div class="ctitle"></div></div><div class="csub"></div></div></div>' +
       '<div class="ch-top">' +
         '<div class="ch-actions">' +
           '<button class="ic list" type="button" title="比赛列表">' + ICON_LIST + '</button>' +
@@ -1241,7 +1250,9 @@ ClipPlayer.prototype.resumePlay = async function () {
   this.render();
 };
 
-ClipPlayer.prototype.togglePlay = function () {
+/* quiet=true：双击播放/暂停时用，只切播放态、不唤出控制条
+   （否则「双击暂停」会把刚收起的浮窗又弹出来） */
+ClipPlayer.prototype.togglePlay = function (quiet) {
   if (this.state !== 'ready' || this.idx < 0) return;
   if (this.playing) this.pauseAll();
   else if (rev.dir < 0) {
@@ -1250,7 +1261,7 @@ ClipPlayer.prototype.togglePlay = function () {
     this.render();
     revStartLoop();
   } else this.resumePlay();
-  showChrome();
+  if (!quiet) showChrome();
 };
 
 ClipPlayer.prototype.stopAll = function () {
@@ -1558,7 +1569,14 @@ ClipPlayer.prototype.magSync = function () {
 };
 
 ClipPlayer.prototype.render = function () {
-  this.titleEl.textContent = this.item.title || '';
+  // 标题行现在很挤（三连按钮、流量、页签都在同一行），标题只剩 ~100px。
+  // 开头那个「[实况录像+集锦]」是每场都一样的分类标签、副标题里已用「集锦」体现，
+  // 截断时留着它等于把有区分度的场次名全挤掉，所以显示时去掉；
+  // 完整标题仍写进 title 属性（长按可见）。
+  var raw = this.item.title || '';
+  var short = raw.replace(/^[\[【][^\]】]{1,12}[\]】]\s*/, '');
+  this.titleEl.textContent = short || raw;
+  this.titleEl.title = raw;
   var sub = dateStr(this.item.pubdate);
   if (this.state === 'ready') {
     if (SETTINGS.mode === 'hl' && this.segs.length) sub += ' · 集锦 ' + (this.idx + 1) + '/' + this.segs.length;
@@ -3690,24 +3708,46 @@ function bindGestures() {
 }
 
 var tapSynth = { t: 0, x: 0, y: 0 };   // 最近一次 onTap 处理过的 tap（吞其合成 click）
+/* 单击 = 显示/隐藏浮窗；双击 = 播放/暂停（2026-11-11 按反馈改）。
+   两种手势共用同一次点击，必须先等 DBL_MS 确认不是双击再执行收起/唤出，
+   否则双击时浮窗会先闪一下。260ms 判断窗口对单击的延迟几乎无感。 */
+var DBL_MS = 260;
+var tapLast = { t: 0, x: 0, y: 0, timer: null };
+function toggleChrome() {
+  if (document.body.classList.contains('chrome-off')) showChrome();
+  else hideChromeNow();
+}
 function onTap(e) {
   if (e && e.target && e.target.closest) {
-    if (e.target.closest('button, .sheet, .fallback, .sheet-mask, #segFloat')) return;
+    if (e.target.closest('button, .sheet, .fallback, .sheet-mask, #segFloat, #socFloat, #socModal')) return;
   }
-  var c = activeClip();
-  if (c && c.state === 'ready' && c.idx >= 0) {
-    c.togglePlay();
-    flashPlayBtn();
+  var now = Date.now();
+  var cx = e.clientX || 0, cy = e.clientY || 0;
+  var dbl = tapLast.t && (now - tapLast.t) < DBL_MS &&
+            Math.abs(cx - tapLast.x) < 60 && Math.abs(cy - tapLast.y) < 60;
+  // 无论单击还是双击，随后浏览器合成的 click 都要吞掉
+  tapSynth.t = now;
+  tapSynth.x = cx; tapSynth.y = cy;
+  if (dbl) {
+    clearTimeout(tapLast.timer);
+    tapLast.t = 0;
+    var c = activeClip();
+    if (c && c.state === 'ready' && c.idx >= 0) {
+      c.togglePlay(true);   // 静默：双击不唤出浮窗
+      flashPlayBtn();
+    }
+    return;
   }
-  if (document.body.classList.contains('chrome-off')) showChrome();
-  // 本次 tap 的动作已由 onTap 完成（暂停/继续+唤回）。随后浏览器合成的 click
-  // 是在 showChrome 之后重新 hit-test 的——此时隐藏控件刚恢复热区，click 会
-  // 命中并触发它们（真机实证：点 btnRev 位置触发倒放、点段行触发跳段）。
-  // 标记本次 tap：捕获阶段吞掉紧跟的同位置 click（只吞第一个，500ms 窗口）。
-  tapSynth.t = Date.now();
-  tapSynth.x = e.clientX; tapSynth.y = e.clientY;
+  tapLast.t = now; tapLast.x = cx; tapLast.y = cy;
+  clearTimeout(tapLast.timer);
+  tapLast.timer = setTimeout(function () {
+    tapLast.t = 0;
+    toggleChrome();
+  }, DBL_MS);
 }
 /* 吞掉 onTap 处理过的 tap 的合成 click：时间+位置双配对，只吞第一个。
+   （tap 若触发了 hideChromeNow/showChrome，隐藏控件刚恢复热区，随后的
+   合成 click 会命中它们——真机实证：点 btnRev 位置触发倒放、点段行跳段。）
    正常控件点击（onTap 早退路径）没有标记，不受影响。 */
 document.addEventListener('click', function (e) {
   if (!tapSynth.t) return;
@@ -3719,7 +3759,7 @@ document.addEventListener('click', function (e) {
   }
 }, true);
 
-/* ---------- 单击播放/暂停：左下角图标反馈 ---------- */
+/* ---------- 双击播放/暂停：左下角图标反馈 ---------- */
 var flashTimer = null;
 function flashPlayBtn() {
   var b = $('#btnPlay');
@@ -4559,26 +4599,39 @@ function setPlayDir(d) {
    chrome / toast / hint
    ============================================================= */
 var chromeTimer = null;
+/* 自动隐藏等待时长。2026-11-11 起单击画面即可即时收起浮窗，自动隐藏退化为
+   「亮着不动」的兜底，所以要给足时间（原 1800ms，操作时太容易突然消失）。 */
+var CHROME_IDLE_MS = 4500;
 /* chrome/segFloat 上按住未松的指针数：操作中（拖进度条/按住按钮/滚动列表）绝不隐藏 */
 var chromeHold = 0;
 function hideChromeIdle() {
   if (chromeHold > 0) { chromeTimer = setTimeout(hideChromeIdle, 1000); return; }
   document.body.classList.add('chrome-off');
 }
+/* 立即收起（单击画面用）：不等自动计时 */
+function hideChromeNow() {
+  clearTimeout(chromeTimer);
+  chromeTimer = null;
+  document.body.classList.add('chrome-off');
+}
 function showChrome() {
   document.body.classList.remove('chrome-off');
   clearTimeout(chromeTimer);
-  chromeTimer = setTimeout(hideChromeIdle, 3000);
+  chromeTimer = setTimeout(hideChromeIdle, CHROME_IDLE_MS);
 }
 /* 可见态下的持续操作刷新计时：滚动列表/拖进度条/移动手指都不会中途隐藏；
    隐藏态的触碰不刷新（由 onTap showChrome 唤回） */
 function keepChrome() {
   if (document.body.classList.contains('chrome-off')) return;
   clearTimeout(chromeTimer);
-  chromeTimer = setTimeout(hideChromeIdle, 3000);
+  chromeTimer = setTimeout(hideChromeIdle, CHROME_IDLE_MS);
 }
 (function bindChromeKeepAlive() {
-  function inChrome(t) { return !!(t && t.closest && (t.closest('.chrome') || t.closest('#segFloat'))); }
+  /* 登录弹层/账号浮窗也计入「正在操作」：用户点授权、粘 Cookie 时不该被淡出 */
+  function inChrome(t) {
+    return !!(t && t.closest && (t.closest('.chrome') || t.closest('#segFloat') ||
+                                 t.closest('#socFloat') || t.closest('#socModal')));
+  }
   document.addEventListener('pointerdown', function (e) {
     if (!inChrome(e.target)) return;
     chromeHold++;
@@ -5074,6 +5127,10 @@ function bindSettings() {
   $('#cookieSave').addEventListener('click', function () {
     var v = (ck.value || '').trim();
     safeSet(COOKIE_KEY, v);
+    // 手填 Cookie 同步给社交模块，三连 / 大会员画质共用同一份登录态
+    if (v && window.VCNCSocial && typeof VCNCSocial.syncManual === 'function') {
+      try { VCNCSocial.syncManual(v); } catch (e) {}
+    }
     toast(v ? 'Cookie 已保存' : 'Cookie 已清除');
   });
 }
@@ -5169,6 +5226,23 @@ function fmtBytes(n) {
   return (n / 1073741824).toFixed(2) + ' GB';
 }
 function fmtSpeed(n) { return fmtBytes(n) + '/s'; }
+/* 顶部 HUD 专用紧凑单位：12px 起步的字号下，少几个字符就能多给标题留几十像素 */
+function fmtHudNum(n) {
+  n = +n || 0;
+  if (n < 1024) return n + 'B';
+  var v, u;
+  if (n < 1048576) { v = n / 1024; u = 'K'; }
+  else if (n < 1073741824) { v = n / 1048576; u = 'M'; }
+  else { v = n / 1073741824; u = 'G'; }
+  // 三位数以上不留小数：186.7M 与 187M 对流量提示没差别，但能省 2~3 个字宽
+  var txt = (v >= 100 ? Math.round(v) : v.toFixed(1));
+  // 1018K 这种四位数值一律进到下一档（1.0M），否则 HUD 会被顶宽
+  if (+txt >= 1000) {
+    if (u === 'K') { txt = (v / 1024).toFixed(1); u = 'M'; }
+    else if (u === 'M') { txt = (v / 1024).toFixed(1); u = 'G'; }
+  }
+  return txt + u;
+}
 
 function nativeOpen(url) {
   if (window.BiliBridge && typeof BiliBridge.openUrl === 'function') {
@@ -5214,15 +5288,53 @@ function bindShareBlock() {
 }
 
 var NET_LAST = null;
+var HUD_COMPACT = false;
+/* 顶行排布：标题行里现在同时有「标题 / 三连按钮 / 流量 / 列表·设置页签」，
+   宽度全靠实测，不写死。netHud 贴页签左侧，chinfo 再把右侧让出来。
+   标题本身至少要留 MIN_TITLE_W（84px，约 6 个字）：HUD 一行放不下时退到紧凑档
+   （藏掉「本次/累计」标签、只留三个数字），带 40px 迟滞避免两档之间反复切换。 */
+var MIN_TITLE_W = 84;
+function hudSetClass(hud, mobile) {
+  hud.className = 'net-hud' + (mobile ? ' mobile' : '') + (HUD_COMPACT ? ' compact' : '');
+}
+function layoutTopRow() {
+  var hud = $('#netHud'), nav = $('#pageNav'), info = $('.chinfo');
+  if (!hud || !nav || !info) return;
+  var navW = nav.offsetWidth || 0;
+  var navRight = 10;                     // .page-nav 的 right
+  var winW = window.innerWidth || 360;
+  var base = navW + navRight + 8;        // HUD 右边界到屏幕右侧的距离
+  var tb = info.querySelector('.ci-triple');
+  var tripleW = tb ? (tb.offsetWidth || 0) + 6 : 0;   // 含 6px 间距
+  hud.style.right = base + 'px';
+  var hudW = hud.offsetWidth || 0;
+  var titleW = winW - 12 - (base + hudW + 6) - tripleW;
+  if (!HUD_COMPACT && titleW < MIN_TITLE_W) {
+    HUD_COMPACT = true;
+    hudSetClass(hud, hud._mobile);
+    hudW = hud.offsetWidth || 0;
+  } else if (HUD_COMPACT && titleW > MIN_TITLE_W + 40) {
+    HUD_COMPACT = false;
+    hudSetClass(hud, hud._mobile);
+    hudW = hud.offsetWidth || 0;
+  }
+  info.style.right = (base + (hudW ? hudW + 6 : 0)) + 'px';
+}
+window.addEventListener('resize', function () { layoutTopRow(); });
 function renderNet(j) {
   if (!j || !j.ok) return;
   NET_LAST = j;
   var mobile = j.network === 'mobile';
   var hud = $('#netHud');
   if (hud) {
-    hud.className = 'net-hud' + (mobile ? ' mobile' : '');
-    hud.innerHTML = (mobile ? '移动数据 · ' : '') + '↓ <b>' + fmtSpeed(j.speed)
-      + '</b> · 本次 ' + fmtBytes(j.session) + ' · 累计 ' + fmtBytes(j.total);
+    hud._mobile = mobile;
+    hudSetClass(hud, mobile);
+    // 信息不精简：实时速率 + 本次 + 累计全在，横排一行（细竖线分隔）
+    hud.innerHTML =
+      '<span class="hud-l1">' + (mobile ? '移动 ' : '') + '↓' + fmtHudNum(j.speed) + '/s</span>' +
+      '<span class="hud-l2"><i class="hud-k">本次</i>' + fmtHudNum(j.session) + '</span>' +
+      '<span class="hud-l3"><i class="hud-k">累计</i>' + fmtHudNum(j.total) + '</span>';
+    layoutTopRow();
   }
   var st = $('#netStat');
   if (st) {
@@ -5405,6 +5517,57 @@ $('#fatalRetry').addEventListener('click', function () { location.reload(); });
   };
   ver();
 })();
+
+/* =============================================================
+   window.VCNC · 社交模块（social.js）访问播放状态的唯一契约
+   -------------------------------------------------------------
+   社交功能刻意做成相对独立：它不碰双 deck / 片段调度 / 手势，只通过
+   这三个入口读取状态与触发重载。契约缺失时 social.js 自动降级为只读。
+   ============================================================= */
+function socialGetState() {
+  var c = activeClip();
+  var ql = [];
+  if (c && c.info && c.info.qualityList && c.info.qualityList.length) {
+    for (var i = 0; i < c.info.qualityList.length; i++) {
+      var it = c.info.qualityList[i];
+      ql.push({ qn: it.qn, name: it.name });
+    }
+  }
+  return {
+    bvid: (c && c.item && c.item.bvid) ? c.item.bvid : '',
+    title: (c && c.info && c.info.title) || (c && c.item && c.item.title) || '',
+    qn: QN,
+    quality: (c && c.info && c.info.quality) || 0,
+    qualityList: ql,
+    ready: !!(c && c.state === 'ready')
+  };
+}
+
+/* 登录态 / 画质变化必须重新 resolve（后端缓存已按登录态清空）。
+   不原地重建 clip：双 deck、倒放帧缓存、片段索引都在运行中，重载后再由
+   POS_KEY 续播是最稳的路径。WebView localStorage 落盘异步，留 260ms。 */
+var socialReloadPending = false;
+function reloadKeepPos() {
+  if (socialReloadPending) return true;
+  socialReloadPending = true;
+  savePosNow();
+  setTimeout(function () {
+    try { location.reload(); } catch (e) { location.href = 'feed.html'; }
+  }, 260);
+  return true;
+}
+
+window.VCNC = {
+  getState: socialGetState,
+  setQuality: function (qn) {
+    qn = parseInt(qn, 10);
+    if (!isFinite(qn) || qn < 6 || qn > 127) return false;
+    QN = qn;
+    safeSet(QN_KEY, String(qn));
+    return reloadKeepPos();
+  },
+  reload: reloadKeepPos
+};
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', function () { init(); });

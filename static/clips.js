@@ -250,6 +250,26 @@
                 lastKey: '', nextAt: 0, status: '' };
   var lastLogin = null, draft = { start: null, end: null }, studio = null;
 
+  // 「自定义」筛选：只看自己创建的片段。只过滤浮窗列表的显示，
+  // 播放序列 segs 与 data-i 索引保持原样，点行跳段不会错位。
+  var mineOnly = false;
+  function mineOnlyState() { return mineOnly; }
+  function syncMineBtn() {
+    var b = $('#sfMine');
+    if (!b) return;
+    b.classList.toggle('on', mineOnly);
+    b.setAttribute('aria-pressed', mineOnly ? 'true' : 'false');
+    b.title = mineOnly ? '当前只看自己创建的片段，点击恢复全部'
+                       : '只看自己创建的集锦片段，再点恢复全部';
+  }
+  function setMineOnly(on) {
+    mineOnly = !!on;
+    syncMineBtn();
+    try { if (global.renderSegFloat) global.renderSegFloat(true); } catch (e) {}
+    renderStudio();
+    tip(mineOnly ? '只看我创建的片段' : '显示全部集锦');
+  }
+
   // ---------------------------------------------------------------- 合并进播放序列
   function forVideo(bvid) {
     if (!bvid) return [];
@@ -434,7 +454,7 @@
     // 整场列表的码可能上 KB，微信文本能发但链接会被截断/拦，退化成纯导入码
     var link = code.length <= 900 ? ('\n查看：' + SHARE_HOST + '#d=' + code) : '';
     return head + link +
-      '\n—— 微信里若打不开 App，复制下面这串，打开 VCNC足球点「导入集锦」——\n' + code;
+      '\n—— 微信里若打不开 App，复制下面这串，打开 VCNC足球 →「＋制作」→「从剪贴板导入」——\n' + code;
   }
   function shareClips(bvid, clips) {
     var txt = shareTextFor(bvid, clips);
@@ -444,8 +464,7 @@
     if (b && b.copyText) {
       try { b.copyText(txt); tip('分享内容已复制，去微信粘贴即可'); return; } catch (e) {}
     }
-    var ta = $('#clipImportInput');
-    if (ta) { ta.value = txt; tip('当前环境没有分享面板，内容已放进输入框'); }
+    tip('当前环境没有分享面板，请手动复制导入码后发送');
   }
   function doImport(raw, fromLink) {
     var o = decodeShare(raw);
@@ -508,8 +527,8 @@
     var bvid = state().bvid;
     if (!bvid) { tip('视频还没准备好'); return; }
     var note = ($('#clipNote') && $('#clipNote').value || '').trim().slice(0, 24) || '片段';
-    var nick = setNick($('#clipNick') && $('#clipNick').value || '');
-    var c = cleanClip({ s: draft.start, d: draft.end - draft.start, u: nick, n: note });
+    // 昵称不再单独占一个输入框：默认「本机」，登录后自动取 B 站昵称
+    var c = cleanClip({ s: draft.start, d: draft.end - draft.start, u: getNick(), n: note });
     if (!c) { tip('片段时间无效'); return; }
     if (!addLocal(bvid, c)) { tip('这个片段已经存在了'); return; }
     draft.start = null; draft.end = null;
@@ -527,30 +546,27 @@
     box.innerHTML =
       '<div class="cs-head"><span>自定义集锦</span><button type="button" class="cs-x" id="csClose">✕</button></div>' +
       '<div class="cs-body">' +
-      '  <div class="cs-sec"><div class="cs-h">① 制作片段</div>' +
-      '    <div class="cs-state" id="csState">暂停 → 设起点 → 播放 → 暂停 → 设终点 → 写备注</div>' +
-      '    <div class="cs-row"><button type="button" class="cs-btn" id="csStart">设起点</button>' +
-      '      <button type="button" class="cs-btn" id="csEnd">设终点</button>' +
-      '      <button type="button" class="cs-btn ghost" id="csClear">清除</button></div>' +
+      // 制作区：不带步骤编号 / 说明文字，只留起点、终点、预设、自定义文字框、保存
+      '  <div class="cs-sec">' +
+      '    <div class="cs-row"><button type="button" class="cs-btn" id="csStart" title="记下当前画面时钟作为起点">起点</button>' +
+      '      <button type="button" class="cs-btn" id="csEnd" title="记下当前画面时钟作为终点">终点</button></div>' +
       '    <div class="cs-chips" id="csChips"></div>' +
-      '    <input class="cs-in" id="clipNote" type="text" maxlength="24" placeholder="备注（也可点上面的预设）">' +
-      '    <div class="cs-row"><input class="cs-in" id="clipNick" type="text" maxlength="16" placeholder="你的昵称">' +
-      '      <button type="button" class="cs-btn primary" id="csSave">保存片段</button></div>' +
+      '    <input class="cs-in" id="clipNote" type="text" maxlength="24" placeholder="自定义文字">' +
+      '    <div class="cs-row"><button type="button" class="cs-btn primary" id="csSave">保存</button></div>' +
       '  </div>' +
-      '  <div class="cs-sec"><div class="cs-h">② 本场列表 <span class="cs-sub" id="csCount"></span></div>' +
+      '  <div class="cs-sec"><div class="cs-h">本场片段 <span class="cs-sub" id="csCount"></span></div>' +
       '    <div class="cs-list" id="csList"></div></div>' +
-      '  <div class="cs-sec"><div class="cs-h">③ 云端 / 他人集锦</div>' +
+      '  <div class="cs-sec"><div class="cs-h">云端 / 他人集锦</div>' +
       '    <div class="cs-cloudstatus" id="csCloudStatus">未登录时只能保存在本机</div>' +
       '    <div class="cs-row"><button type="button" class="cs-btn" id="csPublish">发布到评论区</button>' +
       '      <button type="button" class="cs-btn" id="csReload">重新读取</button></div>' +
       '    <div class="cs-list" id="csOthers"></div>' +
       '    <div class="cs-note">发布＝替换你之前发的那份集锦评论；B 站删掉评论后，云端这份会消失，本机列表仍保留。</div>' +
       '  </div>' +
-      '  <div class="cs-sec"><div class="cs-h">④ 分享 / 导入</div>' +
+      // 「导入集锦」按钮已按反馈删除：导入统一走剪贴板一键导入 / 分享深链自动导入
+      '  <div class="cs-sec"><div class="cs-h">分享 / 导入</div>' +
       '    <div class="cs-row"><button type="button" class="cs-btn" id="csShareAll">分享整场</button>' +
       '      <button type="button" class="cs-btn" id="csPaste">从剪贴板导入</button></div>' +
-      '    <textarea class="cs-ta" id="clipImportInput" rows="2" placeholder="粘贴 VC1. 开头的导入码"></textarea>' +
-      '    <div class="cs-row"><button type="button" class="cs-btn primary" id="csImport">导入集锦</button></div>' +
       '  </div>' +
       '</div>';
     document.body.appendChild(box);
@@ -570,9 +586,6 @@
     $('#csClose', box).addEventListener('click', function () { box.hidden = true; });
     $('#csStart', box).addEventListener('click', setStart);
     $('#csEnd', box).addEventListener('click', setEnd);
-    $('#csClear', box).addEventListener('click', function () {
-      draft.start = null; draft.end = null; renderStudio();
-    });
     $('#csSave', box).addEventListener('click', saveClip);
     $('#csPublish', box).addEventListener('click', publish);
     $('#csReload', box).addEventListener('click', function () {
@@ -584,17 +597,12 @@
       if (!l.length) { tip('本场还没有自定义片段'); return; }
       shareClips(st.bvid, l);
     });
+    // 导入只留一键剪贴板路径（原「导入集锦」按钮已删）：复制朋友发的 VC1. 码后点这里
     $('#csPaste', box).addEventListener('click', function () {
       var b = bridge(), v = '';
       if (b && b.getClipboardText) { try { v = b.getClipboardText() || ''; } catch (e) {} }
-      if (!v) { tip('请长按输入框粘贴导入码'); return; }
-      $('#clipImportInput', box).value = v.trim();
+      if (!v || !extractCode(v)) { tip('请先复制朋友分享的 VC1. 导入码'); return; }
       doImport(v.trim(), false);
-    });
-    $('#csImport', box).addEventListener('click', function () {
-      var v = ($('#clipImportInput', box).value || '').trim();
-      if (!v) { tip('先粘贴导入码'); return; }
-      doImport(v, false);
     });
     return box;
   }
@@ -603,14 +611,14 @@
     studio = studio || buildStudio();
     if (!studio || studio.hidden) return;
     var st = state(), bvid = st.bvid || '', me = getMe();
-    var sEl = $('#csState', studio);
-    if (sEl) sEl.textContent = (draft.start == null)
-      ? '暂停 → 设起点 → 播放 → 暂停 → 设终点 → 写备注'
-      : (draft.end == null ? ('起点 ' + s2t(draft.start) + ' · 播放到结束处点「设终点」')
-                           : ('起点 ' + s2t(draft.start) + ' → 终点 ' + s2t(draft.end) +
-                              '（' + (draft.end - draft.start) + 's）· 写备注后保存'));
-    var ni = $('#clipNick', studio);
-    if (ni && document.activeElement !== ni) ni.value = getNick();
+    // 不用步骤说明文字：起点/终点按钮点亮表示已记下，具体区间放保存按钮的 title
+    var bs = $('#csStart', studio), be = $('#csEnd', studio), sv = $('#csSave', studio);
+    if (bs) bs.classList.toggle('on', draft.start != null);
+    if (be) be.classList.toggle('on', draft.end != null);
+    if (sv) sv.title = (draft.start == null) ? '先点「起点」，播放到结束处再点「终点」'
+      : (draft.end == null ? ('起点 ' + s2t(draft.start) + '，播放到结束处点「终点」')
+        : ('保存 ' + s2t(draft.start) + ' → ' + s2t(draft.end) +
+           '（' + (draft.end - draft.start) + 's）'));
     var cn = $('#csCount', studio);
     var list = localList(bvid);
     if (cn) cn.textContent = list.length ? (list.length + ' 段') : '';
@@ -675,10 +683,10 @@
 
   // ---------------------------------------------------------------- 启动
   function bindFloatTools() {
-    var make = $('#sfMake'), cloudBtn = $('#sfCloud'), imp = $('#sfImport');
+    var make = $('#sfMake'), mine = $('#sfMine');
     if (make) make.addEventListener('click', function () { openStudio('make'); });
-    if (cloudBtn) cloudBtn.addEventListener('click', function () { openStudio('cloud'); });
-    if (imp) imp.addEventListener('click', function () { openStudio('import'); });
+    if (mine) mine.addEventListener('click', function () { setMineOnly(!mineOnly); });
+    syncMineBtn();
   }
 
   function init() {
@@ -706,6 +714,8 @@
   // 给 feed.js 的挂载点：buildSegs() 会把这些伪 matched 项混进官方集锦
   global.VCNCClips = {
     forVideo: forVideo,
+    mineOnlyState: mineOnlyState,
+    setMineOnly: setMineOnly,
     localList: localList,
     addLocal: addLocal,
     delLocal: delLocal,

@@ -370,6 +370,8 @@
   function openLogin() {
     if (!modalEl) return;
     modalEl.hidden = false;
+    // 同步给全页样式：弹层盖满时自定义集锦面板要整体退场（clips.css）
+    document.body.classList.add('soc-modal-open');
     // 弹层跟着 chrome 一起隐藏，打开时先点亮并重置计时
     if (typeof global.showChrome === 'function') global.showChrome();
     startAuth();
@@ -377,6 +379,7 @@
   function closeLogin() {
     if (!modalEl) return;
     modalEl.hidden = true;
+    document.body.classList.remove('soc-modal-open');
     stopPoll();
     authKey = '';
   }

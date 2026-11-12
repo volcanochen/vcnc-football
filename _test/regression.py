@@ -605,7 +605,7 @@ def t_settings_migrate(s, ctx):
     return ok, json.dumps(r, ensure_ascii=False)
 
 
-@case("calib-math", "时间对齐数学：toStream/toOrig 往返、片段映射到流时间轴、还原现场")
+@case("calib-math", "时间对齐数学：toStream/toOrig 往返、首段映射到流时间轴、还原现场")
 def t_calib_math(s, ctx):
     r = jev(s, """
     (function(){
@@ -614,17 +614,22 @@ def t_calib_math(s, ctx):
       var out = {};
       out.roundTrip = Math.abs(toOrig(toStream(3869)) - 3869) < 1e-6;
       out.toStreamVal = +toStream(3869).toFixed(3);            // (3869+0.404)/0.999068 ≈ 3873.01
-      // 片段映射：最早一条 seg.start ≈ toStream(评论时间) - padF
+      // 片段映射：自定义集锦混排后 segs[0] 可能是官方段（start=toStream(orig)-padF）
+      // 也可能是本机自定义段（不吃补时，start=toStream(orig)），按各自规则验证
       var c = activeClip();
-      if (c && c.info && c.segs.length && c.info.matched && c.info.matched.length) {
+      if (c && c.info && c.segs.length && c.segs[0] && c.info.matched && c.info.matched.length) {
         var t0 = null;
         for (var i = 0; i < c.info.matched.length; i++) {      // matched 未排序，取最早时间
-          var s0 = toSec(c.info.matched[i].time || '');
-          if (s0 != null && (t0 == null || s0 < t0)) t0 = s0;
+          var m0 = toSec(c.info.matched[i].time || '');
+          if (m0 != null && (t0 == null || m0 < t0)) t0 = m0;
         }
         if (t0 != null) {
-          out.seg0Consistent = Math.abs(c.segs[0].start - (toStream(t0) - effPadFront())) < 0.5;
-          out.origKept = c.segs[0].orig === t0;
+          var first = c.segs[0];
+          var custom = first.src && first.src !== 'vcnc';
+          out.seg0Src = first.src || 'vcnc';
+          out.seg0Consistent = Math.abs(first.start -
+              (toStream(first.orig) - (custom ? 0 : effPadFront()))) < 0.5;
+          out.origKept = custom ? (first.orig != null) : (first.orig === t0);
         }
       }
       calib.ok = bak.ok; calib.a = bak.a; calib.b = bak.b;      // 还原现场

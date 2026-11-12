@@ -3053,9 +3053,13 @@ function renderSegFloat(force) {
   if (!box) return;
   var c = activeClip();
   var segs = (c && c.segs && c.segs.length) ? c.segs : null;
+  /* 「自定义」按钮：只看自己创建的片段。只过滤显示，播放序列与 data-i 索引不动。 */
+  var mineOnly = !!(window.VCNCClips && window.VCNCClips.mineOnlyState &&
+                    window.VCNCClips.mineOnlyState());
   if (!force && segs === sfSegsFor) return;
   sfSegsFor = segs;
   box.innerHTML = '';
+  var shown = 0;
   if (!segs || !segs.length) {
     var e = document.createElement('div');
     e.className = 'sf-empty';
@@ -3063,6 +3067,7 @@ function renderSegFloat(force) {
     box.appendChild(e);
   } else {
     for (var i = 0; i < segs.length; i++) {
+      if (mineOnly && segs[i].src !== 'mine') continue;
       var row = document.createElement('div');
       row.className = 'sf-row' + (segs[i].src && segs[i].src !== 'vcnc'
         ? ' src-' + segs[i].src : '');
@@ -3089,12 +3094,21 @@ function renderSegFloat(force) {
       // 每行只显示序号/时间/备注：单段循环入口统一放左下角播放控件 #btnLoop
       row.appendChild(no); row.appendChild(t); row.appendChild(note);
       box.appendChild(row);
+      shown++;
+    }
+    if (mineOnly && !shown) {
+      box.innerHTML = '';
+      var none = document.createElement('div');
+      none.className = 'sf-empty';
+      none.textContent = '还没有自己创建的片段';
+      box.appendChild(none);
     }
   }
   var cnt = $('#sfCount');
   if (cnt) {
     var total = (c && c.segTotal) || (segs ? segs.length : 0);
     cnt.textContent = !segs ? '—'
+      : mineOnly ? (shown + '/' + segs.length + ' 段')
       : (total > segs.length ? (segs.length + '/' + total + ' 段') : (segs.length + ' 段'));
   }
   var tt = $('#sfTitle');
@@ -4617,13 +4631,17 @@ function setPlayDir(d) {
    chrome / toast / hint
    ============================================================= */
 var chromeTimer = null;
-/* 自动隐藏等待时长。2026-11-11 起单击画面即可即时收起浮窗，自动隐藏退化为
-   「亮着不动」的兜底，所以要给足时间（原 1800ms，操作时太容易突然消失）。 */
-var CHROME_IDLE_MS = 4500;
+/* 自动隐藏等待时长：2026-11-13 按反馈调回 2s（原 4500ms）。
+   单击画面仍可即时收起，自动隐藏只是「亮着不动」的兜底。 */
+var CHROME_IDLE_MS = 2000;
 /* chrome/segFloat 上按住未松的指针数：操作中（拖进度条/按住按钮/滚动列表）绝不隐藏 */
 var chromeHold = 0;
 function hideChromeIdle() {
   if (chromeHold > 0) { chromeTimer = setTimeout(hideChromeIdle, 1000); return; }
+  /* 制作面板开着时不淡出：2s 自动隐藏会连 #clipsStudio 一起关掉 pointer-events，
+     用户正在选起点/写备注会突然点不到按钮；关掉面板后再按 2s 计时收起。 */
+  var cs = $('#clipsStudio');
+  if (cs && !cs.hidden) { chromeTimer = setTimeout(hideChromeIdle, 1000); return; }
   document.body.classList.add('chrome-off');
 }
 /* 立即收起（单击画面用）：不等自动计时 */

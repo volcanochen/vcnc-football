@@ -2,7 +2,7 @@
    自定义集锦：浮窗工具行 / 工作室面板 / 片段来源配色
    ========================================================================= */
 
-/* 浮窗只有 118px 宽：三个按钮平分，短标签 + title 提示 */
+/* 浮窗只有 118px 宽：两个按钮平分，短标签 + title 提示 */
 .sf-tools {
   display: flex;
   flex: none;
@@ -29,17 +29,38 @@
   cursor: pointer;
 }
 .sf-tools button:active { background: rgba(0, 174, 236, .5); }
+/* 「自定义」筛选开启：整颗按钮高亮，明确告知当前只看自己创建的片段 */
+.sf-tools button.on {
+  border-color: #4ade80;
+  background: rgba(74, 222, 128, .28);
+  color: #dcfce7;
+  font-weight: 600;
+}
 .segfloat.fold .sf-tools { display: none; }
 
-/* 来源配色：左侧 3px 色条 + 时间戳同色，官方集锦保持原样 */
+/* 来源配色：官方集锦保持默认白/灰，自定义片段整行文字换色（序号/时间/备注都换），
+   再加左侧色条与极淡底色，和官方片段一眼可分。.on/.loop 的选中态背景优先。 */
 .sf-row.src-mine, .sf-row.src-cloud, .sf-row.src-other { border-left: 3px solid transparent; padding-left: 4px; }
 .sf-row.src-mine { border-left-color: #4ade80; }
 .sf-row.src-cloud { border-left-color: #a78bfa; }
 .sf-row.src-other { border-left-color: #fbbf24; }
-.sf-row.src-mine .sf-t { color: #86efac; }
-.sf-row.src-cloud .sf-t { color: #c4b5fd; }
-.sf-row.src-other .sf-t { color: #fcd34d; }
-.sf-row.src-mine .sf-note, .sf-row.src-cloud .sf-note, .sf-row.src-other .sf-note { color: rgba(255, 255, 255, .72); }
+.sf-row.src-mine:not(.on):not(.loop) { background: rgba(74, 222, 128, .08); }
+.sf-row.src-cloud:not(.on):not(.loop) { background: rgba(167, 139, 250, .08); }
+.sf-row.src-other:not(.on):not(.loop) { background: rgba(251, 191, 36, .08); }
+/* 我·本机：青绿 */
+.sf-row.src-mine .sf-no { color: rgba(134, 239, 172, .7); }
+.sf-row.src-mine .sf-t { color: #86efac; font-weight: 600; }
+.sf-row.src-mine .sf-note { color: #bbf7d0; }
+/* 我·云端：蓝紫 */
+.sf-row.src-cloud .sf-no { color: rgba(196, 181, 253, .7); }
+.sf-row.src-cloud .sf-t { color: #c4b5fd; font-weight: 600; }
+.sf-row.src-cloud .sf-note { color: #ddd6fe; }
+/* 他人·已载入：橙黄 */
+.sf-row.src-other .sf-no { color: rgba(252, 211, 77, .7); }
+.sf-row.src-other .sf-t { color: #fcd34d; font-weight: 600; }
+.sf-row.src-other .sf-note { color: #fde68a; }
+/* 筛选态下选中行仍是蓝底，但文字颜色不能被冲掉 */
+.sf-row.src-mine.on .sf-t, .sf-row.src-cloud.on .sf-t, .sf-row.src-other.on .sf-t { font-weight: 600; }
 
 /* 工作面板：贴左，避开顶部标题行与左下控制条；半透明不挡完画面 */
 .clip-studio {
@@ -122,6 +143,8 @@
 .cs-btn:last-child { margin-right: 0; }
 .cs-btn.ghost { flex: 0 0 48px; background: transparent; color: rgba(255, 255, 255, .55); }
 .cs-btn.primary { flex: 0 0 78px; background: #00aeec; border-color: #00aeec; color: #fff; font-weight: 600; }
+/* 起点 / 终点已记下：按钮点亮，代替原来的步骤说明文字 */
+.cs-btn.on { border-color: #4ade80; background: rgba(74, 222, 128, .24); color: #dcfce7; }
 .cs-btn:active { opacity: .7; }
 .cs-chips { display: flex; flex-wrap: wrap; margin-top: 7px; }
 .cs-chip {
@@ -190,3 +213,9 @@
 
 /* 与其它浮窗同进退：隐藏时连同热区一起关掉 */
 body.chrome-off #clipsStudio { opacity: 0; pointer-events: none; }
+
+/* 工作面板与播放画面同层：比赛列表 / 设置页（goPage 同步 body[data-page]）、
+   登录弹层（social.js 开关弹层时同步 body.soc-modal-open）出现时整体退场，
+   不能压在这些全屏界面上面；切回播放页/关掉弹层即恢复原状 */
+body:not([data-page="1"]) #clipsStudio,
+body.soc-modal-open #clipsStudio { opacity: 0; pointer-events: none; }

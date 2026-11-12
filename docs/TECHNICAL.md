@@ -225,9 +225,11 @@ python _test/regression.py --list     # 用例清单
 **手势模型（2026-11-11 起）**：单击画面 = 显示/隐藏浮窗，双击 = 播放/暂停。单击动作
 延后 `DBL_MS`（260ms）执行，用来确认不是双击，否则双击时浮窗会先闪一下；双击走
 `togglePlay(true)`（quiet 参数）跳过 `showChrome()`，避免「双击暂停」把刚收起的浮窗
-又弹出来。因为单点即可即时收起，`CHROME_IDLE_MS` 从 1800ms 放宽到 **4500ms**，
-自动隐藏退化为「亮着不动」的兜底。单击与双击都要在捕获阶段吞掉浏览器随后合成的
-click（`tapSynth` 时间+位置配对），否则会点到刚恢复热区的隐藏控件。
+又弹出来。因为单点即可即时收起，`CHROME_IDLE_MS` 曾放宽到 4500ms；**2026-11-13 按反馈
+调回 `2000ms`（2 秒）**，自动隐藏仍只是「亮着不动」的兜底。为避免 2s 让正在操作的面板
+突然消失，`hideChromeIdle()` 在 `#clipsStudio` 打开时会每秒复查、不淡出（面板关闭后再计时）。
+单击与双击都要在捕获阶段吞掉浏览器随后合成的 click（`tapSynth` 时间+位置配对），
+否则会点到刚恢复热区的隐藏控件。
 
 两台设备同时验证时给第二台换一个本地端口即可：
 `CDP_PORT=9923 python _test/regression.py`（`cdp.py` / `cdp_eval.py` / `regression.py`
@@ -376,7 +378,9 @@ manifest 用 `@string/app_name` 引用而非硬编码，系统按语言自动切
 | 本地持久化 | `clips.js` → `localStorage['vcnc.clips.v1']`，`{ bvid: { nick, list:[clip] } }`，未登录也能用 |
 | 播放序列 | `feed.js: ClipPlayer.buildSegs()` 开头把 `VCNCClips.forVideo(bvid)` 返回的伪 matched 项 `concat` 进官方时间戳，共用排序 / 截断 / 连播调度；自定义片段带 `src / user / cid`，且**不吃自动补时**（用户框的是精确起止） |
 | 时间轴 | 制作时 `VCNC.getTime().orig`（`toOrig(currentTime)`）落盘，和置顶评论同一条原始录像时钟；播放时 `toStream()` 换回，校准改动不会让片段漂移 |
-| 浮窗 | `renderSegFloat()` 给行加 `.src-mine / .src-cloud / .src-other` 配色；`.sf-tools` 三个按钮共用一个 `#clipsStudio` 面板，`inChrome()` 与 `body.chrome-off` 都把它算进去 |
+| 浮窗 | `renderSegFloat()` 给行加 `.src-mine / .src-cloud / .src-other`，整行文字换色 + 左侧色条 + 淡底，与官方白/灰区分；`.sf-tools` 两个按钮：`＋制作` 打开 `#clipsStudio`，`自定义` 调 `VCNCClips.setMineOnly()` 只过滤**显示**（`segs` 与 `data-i` 不变，点行跳段不错位）。`inChrome()` 与 `body.chrome-off` 都把面板算进去 |
+| 同层显隐 | 工作面板**与播放画面同层**：`body:not([data-page="1"]) #clipsStudio`（比赛列表 / 设置页时退场，`goPage()` 同步 `data-page`）+ `body.soc-modal-open #clipsStudio`（登录弹层开着时退场，`social.js` 开关弹层时同步该 class），两条规则都是 `opacity:0 + pointer-events:none`，不与 `.clip-studio[hidden]` 的 display 冲突；切回播放页 / 关掉弹层即恢复原状 |
+| 制作面板 | 只有起点 / 终点 / 预设备注 / 自定义文字框 / 保存五个控件；无编号标题、无步骤说明，起点终点用按钮点亮态反馈，区间写在保存按钮 `title`。昵称不再单独输入，取 `getNick()`；「导入集锦」按钮与 textarea 已删，导入统一走「从剪贴板导入」+ `?imp=` 深链自动导入 |
 | 评论区读写 | 两端 `/api/replies`（GET）、`/api/clips/publish`、`/api/clips/delete`（POST + 同源校验）；`BiliSocial.java` / `social.py` 各用 `x/v2/reply/add|del`，前端统一解析 `【VCNC集锦v1】` 格式 |
 | 自动读回 | `clips.js` 2s 轮询 `VCNCSocial.getMe()`，登录态 false→true 或换场时拉一次；`-412` / 空结果按 30s 退避，防止把 IP 打进更长的黑名单 |
 | 分享导入 | `VC1.<base64url>.<crc8>`；`shareText` 桥发微信，H5 中转页 `share/index.html` 试 `vcncfootball://import?b=&d=`，微信拦下就用 `getClipboardText()` 桥 + 粘贴兜底；`MainActivity.handleIntent` 把码写成 `feed.html?imp=` |
@@ -384,7 +388,8 @@ manifest 用 `@string/app_name` 引用而非硬编码，系统按语言自动切
 `_test/verify_clips_codec.js` 是免设备编解码回归（Node + 最小 DOM 桩，27 项）；
 `_test/verify_share_page.js` 把微信中转页的内联脚本放进同一类 DOM 桩执行（11 项），
 防止 H5 页独立实现的 `crc8` / `base64url` 与 App 内 `clips.js` 漂移；
-`_test/verify_clips.js` 是真机 CDP 专项（DOM / 契约 / 混排配色 / 面板开合，跑完自动删掉临时片段）。
+`_test/verify_clips.js` 是真机 CDP 专项（DOM / 契约 / 混排配色 / 面板精简 / 「自定义」筛选 /
+2s 自动隐藏 / 与播放画面同层，跑完自动删掉临时片段）。
 三条线里前两条已并入发布门禁的「集锦编解码回归」，第三条是每台真机的「集锦验收」。
 
 ---

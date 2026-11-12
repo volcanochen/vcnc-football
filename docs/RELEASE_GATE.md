@@ -27,6 +27,7 @@
 | 源码 | App 授权主路径 11 项齐全（JS 桥检测/唤起、`<queries>` 包可见性、`bilibili://browser` 深链、`/api/social/auth`、二维码默认折叠、浮窗同进退隐藏、HUD 与标题同行靠右且信息未精简、三连按钮在标题行、隐藏时长 2~8s、单击显隐/双击播停） | 唤起链路断一节，登录就退化成假功能 |
 | 源码 | **集锦编解码回归** `_test/verify_clips_codec.js` ≥25 项 + `_test/verify_share_page.js` ≥10 项全绿 | 分享码 / 评论文本 / 微信 H5 中转页是三处独立实现，纯 Node 免真机就能挡住篡改、分片、mid 分组、去重与两份解码器漂移 |
 | 源码 | **集锦模块文件** 7 个（`clips.js` / `clips.css` / `CUSTOM_CLIPS.md` / `share/index.html` / 三个验收脚本）+ `vcncfootball://import` 深链 + `getClipboardText()` 桥 + `CLIP_CODE` 解析齐全 | 导入链路任一节缺失，朋友分享的集锦就进不来 |
+| 源码 | **风控韧性回归** `_test/verify_risk_guard.py` ≥40 项全绿（模拟 -352 / HTTP 412 / view 阶段受限 / feed 冷却期，含三端静态契约） | 断路器、快照降级、冷却期 0 请求任一节退化，风控时就会重新变成「加载失败」白屏 |
 | 资源 | 5 档密度 × 4 张 launcher 图 + 2 个自适应图标 XML + 3 张分享图齐全 | 缺某档在对应 DPI 设备上会回退成模糊图标 |
 | 资源 | `values` / `values-zh` / `values-en` 三套名称 + manifest 用 `@string/app_name` | 少 `values-zh` 会让中文系统回退到英文（真机踩过） |
 | 资源 | `build_apk.sh` 与 `build_apk.bat` 都复制 3 张 PNG + 社交 3 个 + 集锦 2 个文件 | 两条构建链产物必须一致 |
@@ -35,20 +36,21 @@
 | APK | `apksigner verify` 通过 | 签名不一致用户装不上更新 |
 | 文档 | 6 份文档（含 `CUSTOM_CLIPS.md`）的相对链接全部有效 | 拆文档后最容易留下死链 |
 | 接口 | Android `ProxyServer` 与桌面 `server.py` 都有 2 条流量 + 7 条社交 + 1 条评论读取 + 2 条集锦写入端点；前端 4 个控件 id 齐全 | 两端行为要对齐，桌面调试不能是哑实现；评论写操作必须 POST + 同源 |
-| 真机（可选） | 每台设备 `_test/regression.py` 全量 19/19 | 防回归，改功能必跑 |
+| 真机（可选） | 每台设备 `_test/regression.py` 全量 20/20 | 防回归，改功能必跑（2026-11-13 起含 seek-fast 非线性快拖） |
 | 真机（可选） | 每台设备 `_test/verify_brand_net.js` 全绿 | 品牌 / 分享区 / 流量接口专项验收 |
-| 真机（可选） | 每台设备 `_test/verify_social.js` 全绿 | 左侧浮窗、App 授权桥与端点、二维码默认不显示且兜底可实绘、同进退隐藏、HUD 贴页签且三项同排一行、三连按钮在标题行且未登录为灰、大会员画质门禁、三连接口（已登录时不发真实三连） |
+| 真机（可选） | 每台设备 `_test/verify_social.js` 全绿 | 左侧浮窗、App 授权桥与端点、二维码默认不显示且兜底可实绘、同进退隐藏、HUD 贴页签且三项同排一行、三连按钮在标题行且未登录为灰、画质档位人人可点（含游客态）、三连接口（已登录时不发真实三连） |
 | 真机（可选） | 每台设备 `_test/verify_top_row.js` 全绿 | 顶行排布专项：头像/昵称/箭头同一行、三连紧跟标题（同一行、间隙 ≤12px）、HUD 同行贴页签且只占一行、播放键更大、倒放键留空隙、收起箭头朝左 |
 | 真机（可选） | 每台设备 `_test/verify_tap.js` 全绿 | 手势语义：单击显示/隐藏浮窗、双击播停且不唤出浮窗、双击后单击仍生效 |
 | 真机（可选） | 每台设备 `_test/verify_clips.js` 全绿 | 自定义集锦：契约与 `＋制作 / 自定义` 工具行齐全（旧云端/导入按钮确已移除）、真机 WebView 中文 `btoa/atob` 分享码往返、临时片段混排且整行文字与官方行不同色、制作面板只留五个控件且无编号步骤/导入按钮、`增量/全量发布` 两按钮齐全且旧 `csPublish` 已移除、分享按钮是 SVG 图标、点行文字进入行内编辑且可取消、筛选开启时 `nextIdx()` 只指向 `mine` 段、`自定义` 筛选后只剩 `src-mine` 行且能恢复、`CHROME_IDLE_MS=2000`、切列表页 / 注入登录弹层 class 时面板 `opacity=0 + pointer-events=none` 且回播放页恢复、临时片段可删且恢复 |
 
-免设备的四条独立回归线（改社交 / 集锦模块时建议先跑）：
+免设备的五条独立回归线（改社交 / 集锦 / 解析链路时建议先跑）：
 
 ```bash
 python _test/verify_qr_matrix.py     # QR 矩阵与标准库逐点比对（需 node + Python qrcode 库，仅测试用）
 python _test/verify_social_api.py    # 桌面端点冒烟（含集锦空内容/未登录/非法 rpid/跨站 403），不发真实评论
 node _test/verify_clips_codec.js     # 分享码 + 评论文本编解码 36 项（含行内编辑/发布记录），纯 Node 免真机
 node _test/verify_share_page.js      # 微信 H5 中转页解码 11 项（正常码/查询串/篡改/缺码/中文）
+python _test/verify_risk_guard.py   # 风控断路器 + 快照降级 44 项，替身 urlopen 不发真实请求
 ```
 
 > **未发版时的预期 FAIL**：只要 `android/VCNC-Football.apk` 已含新改动但还没升版本归档，

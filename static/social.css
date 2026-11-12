@@ -149,7 +149,6 @@ body.chrome-off .soc-modal { opacity: 0; pointer-events: none; }
 .soc-q:nth-child(2n) { margin-right: 0; }
 .soc-q.on { background: #00aeec; border-color: #00aeec; color: #fff; font-weight: 600; }
 .soc-q[disabled] { opacity: .32; cursor: default; }
-.soc-q-empty { font-size: 10px; color: rgba(255, 255, 255, .42); line-height: 1.5; }
 
 .soc-state { margin-top: 5px; font-size: 10px; line-height: 1.4; color: rgba(255, 255, 255, .6); }
 .soc-state.ok { color: #7fe0a8; }

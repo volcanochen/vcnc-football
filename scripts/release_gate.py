@@ -186,7 +186,8 @@ def main():
         files = ["server.py", "social.py", "scripts/make_release.py", "scripts/gen_brand_assets.py",
                  "scripts/gen_share_assets.py", "scripts/release_gate.py",
                  "_test/regression.py", "_test/cdp_eval.py",
-                 "_test/verify_qr_matrix.py", "_test/verify_social_api.py"]
+                 "_test/verify_qr_matrix.py", "_test/verify_social_api.py",
+                 "_test/verify_risk_guard.py"]
         bad = []
         for f in files:
             try:
@@ -394,8 +395,17 @@ def main():
         if "CLIP_CODE" not in java: bad.append("导入码解析")
         return not bad, "自定义集锦 7 个文件 + 深链/剪贴板齐全" if not bad else "缺 " + ",".join(bad)
 
+    def c_risk_guard():
+        """风控断路器 + 解析快照降级：桌面端行为模拟 + 三端静态契约，免真机。"""
+        rc, out = run([sys.executable, "_test/verify_risk_guard.py"], timeout=120)
+        m = re.search(r"(\d+) PASS / (\d+) FAIL", out)
+        ok = rc == 0 and m and int(m.group(2)) == 0 and int(m.group(1)) >= 40
+        return (bool(ok), "风控韧性回归 %s 项全绿" % (m.group(1) if m else "?")
+                if ok else "风控韧性回归失败：" + out.strip()[-200:])
+
     check("集锦编解码回归", c_clips_codec)
     check("集锦模块文件", c_clips_files)
+    check("风控韧性回归", c_risk_guard)
     check("文档相对链接", c_links)
     check("流量 / 社交接口两端对齐", c_api_parity)
     check("社交模块文件", c_social_files)
@@ -490,10 +500,12 @@ def main():
                     bad.append("双击判定窗口")
                 if not (j.get("state") or {}).get("bvid") or (j.get("qualityButtons") or 0) < 1:
                     bad.append("画质契约")
-                # 非大会员（含未登录）时画质必须全部禁用
-                if not (j.get("me") or {}).get("vip") and \
-                        j.get("qualityDisabled") != j.get("qualityButtons"):
-                    bad.append("大会员画质门禁")
+                # 画质档位人人可点：基础档 360P~1080P 不需要大会员，
+                # 列表 = accept_quality ∪ 基础四档，按钮一律不禁用
+                if not ((j.get("qualityButtons") or 0) >= 4):
+                    bad.append("画质基础档缺失")
+                if j.get("qualityDisabled") != 0:
+                    bad.append("画质按钮被禁用（应为人人可点）")
                 ta = j.get("tripleApi") or {}
                 if "ok" not in ta:
                     bad.append("三连接口无响应")

@@ -189,8 +189,26 @@ python scripts/make_release.py --tag $TAG
   产出（YOLO + 颜色/运动/姿态融合 → Viterbi / 锚点跟踪），以 JSON 下发到 `/api/tracks/<bvid>`。
   端侧启发式只是兜底，请勿把它当作最终精度。该仓库后续的 `track_v2` / BallTracer 成果尚未回灌到端侧。
 - **B 站风控**：动态 feed 请求**不能带 `Origin` 头**（会触发 -352 或返回空数据）；
-  `-352` 是 IP 级滑动窗口限流，靠退避 + 刷新 buvid + 本地缓存兜底，登录 Cookie 可提高配额。
-  评论接口 `/x/v2/reply` 的 `ps` 必须 ≤ 20；playurl 需要 wbi 签名。
+  `-352/-412/-403/-509` 与 HTTP `412/429` 都是**出口 IP 级滑动窗口限流**，不是网络故障，
+  瞬时重试只会把封锁从几十秒拉长到数分钟。评论接口 `/x/v2/reply` 的 `ps` 必须 ≤ 20；
+  playurl 需要 wbi 签名（`wts` 是签名的一部分，重试必须重签，不能复用旧 query）。
+
+### 风控韧性（2026-11-13）
+
+| 层 | 做法 | 位置 |
+|---|---|---|
+| 识别 | 在唯一 HTTP 出口统一扫响应头 256 字节：`code` 命中风险码或 `request was banned` 文案即记为风控；HTTP 412/429 单独拦（body 不是 JSON） | `BiliApi.noteResponse()` / `server.note_response()` |
+| 断路器 | 命中即拉起全局冷却，连续命中按 30→60→120→300s 阶梯拉长；冷却期内 `resolve()` / `fetchSpaceFeed()` 直接短路，一个包都不发 | `RISK_COOLDOWN` / `riskBlocked()` |
+| 降压 | 登录 Cookie（SESSDATA）覆盖 view/spi/nav/playurl/评论全链路（旧版只有 playurl 带）；playurl **只在非风控的瞬时失败**下退避 2s + 刷 buvid + 重签重试一次，命中风控立即收手；5 页评论从「与 playurl 并行」改为「playurl 成功且不在冷却期才发」 | `BiliApi.resolve()` |
+| 兜底 | 每次解析成功把结果 + 流地址写入应用私有 `files/resolve_snapshot.json`（只存公开流地址，不存凭证，最多 24 条）；风控时重新登记 token 回放快照，响应带 `degraded / degradedReason / retryAfter` | `saveSnapshot()` / `restoreResolve()` / `degrade()` |
+| 为什么能播 | `MediaCache` 的 key 是 `bvid|page|qn|kind`，与每次 resolve 都变的 token 解耦；快照里的地址只用于未命中区间，已缓存字节全部本地 206 命中，整个降级过程对 B 站 0 次 API 请求 | `MediaCache.java` |
+| 前端 | `degraded` 时跳过集锦预取（签名过期只会 403）、提示「正在用本地缓存播放」；失败文案带等待秒数并给「重试」按钮加冷却，避免连点加热窗口 | `ClipPlayer.resolve()` / `retry()` |
+
+注册入口：`ProxyServer` 构造时调 `BiliApi.init(ctx.getFilesDir())`；桌面端等价文件是 `_cache/resolve_snapshot.json`。
+回归用例 `_test/verify_risk_guard.py`（44 项，已接入发布门禁）用替身 `urlopen` 模拟 -352 / HTTP 412 / view 阶段受限 / feed 冷却期，验证「成功留快照 → 风控降级 → 冷却期 0 请求 → 无快照给明确提示」，并核对 Android / 桌面 / 前端三端静态契约。冷却由唯一的 HTTP 出口触发后，`view` 的 3 次退避重试、`spi`/`nav` 补发、`playurl` 二次重打、5 页评论、预取都会立刻收手，真正做到冷却期零上游请求。
+
+**用户侧最快的三个办法**：B 站 App 授权登录（配额最高）→ 切 WiFi/蜂窝换出口 IP → 等冷却时间过去；
+看过的比赛即使接口被限也能从本地缓存继续播，只是未缓存过的片段会失败。
 - **B 站登录/三连是非公开接口**：2026-08 Web 登录已改版一次（SESSDATA 从返回 URL 改到
   `Set-Cookie`），`bilibili://browser` 深链也是未文档化入口，后续仍可能变。双端已对两条
   cookie 路径做兼容；唤起失败会自动回退到复制授权链接 / 二维码 / 手填 Cookie。但真实
@@ -215,9 +233,9 @@ python _test/regression.py --no-reload  # 复用当前状态（快）
 python _test/regression.py --list     # 用例清单
 ```
 
-当前 19 个用例：UI 控件齐全、三页切换、返回键三段语义、横屏双指缩放、
+当前 19 个用例（2026-11-13 起含 **seek-fast** 共 20 个）：UI 控件齐全、三页切换、返回键三段语义、横屏双指缩放、
 **横屏缩放跨 deck 硬切不丢失**（回归：横屏自定义缩放失效）、竖屏分屏缩放、
-恢复画面按钮、跟踪球按钮、横滑 seek 落点、倒放方向模型与箭头、暂停恢复、
+恢复画面按钮、跟踪球按钮、横滑 seek 落点、**非线性快拖（seek-fast：曲线 C1 连续/单调/端点、跨段 jumpTo 落点、半屏内仍钳当前段）**、倒放方向模型与箭头、暂停恢复、
 集锦浮窗与全场/集锦切换、缓存上限接口（**回归：无参读取重置上限**）、设置迁移、时间对齐数学（toStream/toOrig 往返 + 片段映射 + orig 保留）、自动补时取值、时间码自动校准（真机 OCR 拟合或缓存命中，浮窗显示原始时间）、倒放 v5 抓帧引擎（被动预缓存/即时起播/后台补抓/pos 倒退/回正放恢复位置）、chrome 自动隐藏（浮动按钮随进度条淡出、播放键常驻）。
 测试在横屏用 `Emulation.setDeviceMetricsOverride` 模拟视口、双指用逻辑级模拟
 （直接驱动 startPinch/movePinch）；CDP 触摸注入在 Chrome 74 内核上不可达，不要依赖。
@@ -230,6 +248,15 @@ python _test/regression.py --list     # 用例清单
 突然消失，`hideChromeIdle()` 在 `#clipsStudio` 打开时会每秒复查、不淡出（面板关闭后再计时）。
 单击与双击都要在捕获阶段吞掉浏览器随后合成的 click（`tapSynth` 时间+位置配对），
 否则会点到刚恢复热区的隐藏控件。
+
+**单指横滑 seek 的非线性速度（2026-11-13）**：半屏内线性（`SEEK_SPAN=90`，拖满半屏
+±45s，**钳在当前段内**精调）；超过半屏进入加速区，`seekDelta()` 用二次速度曲线
+`v(u)=k1·(1+A·u²)`（A 由 ∫凑满 `SEEK_FAR_SPAN=600` 反解），起点接线性末速（C1 连续）、
+终点约 38× 线性速度，拖满一屏 ±约 645s，且**允许跨段**——`seekTargetSegIdx()` 算落点
+所在段（段间空隙归左侧段），气泡显示落点原始时间 + `段i/n`；跨段时**不做跟手预览**
+（deck 硬切流水线不能拖动中打断），松手 `endSeek()` 走 `jumpTo(ti, {user, seekOffset})`
+（busy 自排队），完成后按拖动前播放状态复位；`cancelSeek()`（系统打断）把落点退回
+当前段，不半途切段。
 
 两台设备同时验证时给第二台换一个本地端口即可：
 `CDP_PORT=9923 python _test/regression.py`（`cdp.py` / `cdp_eval.py` / `regression.py`
@@ -246,7 +273,7 @@ python _test/regression.py --list     # 用例清单
 HUD 与标题同行且贴页签、三项信息横排一行、播放键比其它键大、
 倒放键空隙、收起箭头方向。`_test/verify_social.js` 检查左侧浮窗位置、`QRGen` 与 `VCNC` 契约、
 App 授权桥与 `/api/social/auth`、二维码默认不绘制且兜底可实绘、chrome 同进退隐藏、
-HUD 贴页签且三项同排一行、非大会员时画质按钮全禁用、三连接口返回（已登录时**不发**真实三连）。
+HUD 贴页签且三项同排一行、画质档位人人可点（列表 = B 站 accept_quality ∪ 基础档位 ∪ 当前/实际档，高亮跟随实际播放画质）、三连接口返回（已登录时**不发**真实三连）。
 `_test/verify_tap.js` 验证手势语义：单击显示/隐藏浮窗（等待 `DBL_MS` 判定窗口后生效）、
 双击播停且**不**唤出浮窗（`togglePlay(true)` 静默路径）、双击后紧接单击仍能收起；
 它直接调用页面里的 `onTap`，因为 `adb shell input tap` 两次点击间隔不可控。

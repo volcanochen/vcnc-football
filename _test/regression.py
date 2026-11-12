@@ -337,6 +337,90 @@ def t_swipe_seek(s, ctx):
     return ok, json.dumps(r, ensure_ascii=False)
 
 
+@case("seek-fast", "非线性快拖：速度曲线 C1 连续/单调、跨段落点 jumpTo 正确、中断退回当前段")
+def t_seek_fast(s, ctx):
+    viewport(s, 846, 412)
+    time.sleep(0.4)
+    r = jev(s, """
+    (async function(){
+      var c = activeClip();
+      if (!c || c.state !== 'ready' || c.segs.length < 2) return JSON.stringify({error: 'not ready', n: c ? c.segs.length : -1});
+      var w = window.innerWidth || 846, h = w / 2;
+      // 1) 曲线性质：零点、端点、单调、C1 连续（半屏两侧斜率一致）
+      var out = {};
+      out.zero = Math.abs(seekDelta(0)) < 1e-9;
+      out.span = Math.abs(Math.abs(seekDelta(w)) - (SEEK_SPAN / 2 + SEEK_FAR_SPAN)) < 1;
+      var mono = true, prev = -1e9;
+      for (var x = 0; x <= w; x += w / 40) {
+        var v = seekDelta(x);
+        if (v < prev - 1e-9) mono = false;
+        prev = v;
+      }
+      out.mono = mono;
+      out.c1 = Math.abs((seekDelta(h + 1) - seekDelta(h)) - (seekDelta(h) - seekDelta(h - 1))) < SEEK_SPAN / w * 4;
+      out.faster = Math.abs(seekDelta(w) - seekDelta(w - w / 20)) > Math.abs(seekDelta(h) - seekDelta(h - w / 20)) * 8;
+      // 2) 跨段：跳到第一段头部，用 70% 满屏射程的落点（保证在段中部，不会落段尾
+      //    被段末推进立刻切走）；seekDelta 单调 → 二分反解 dxs
+      c.jumpTo(0);
+      await new Promise(function (res) { setTimeout(res, 2500); });
+      c = activeClip();
+      var seg = c.segs[c.idx];
+      var d = c.decks[c.activeDeck];
+      var seek0 = seg.start + Math.min(1, seg.dur * 0.1);
+      d.v.currentTime = seek0;
+      await new Promise(function (res) { setTimeout(res, 500); });
+      seek0 = d.v.currentTime;
+      var tTarget = seek0 + seekDelta(w) * 0.7;
+      var ti = seekTargetSegIdx(c, tTarget);
+      if (ti == null) return JSON.stringify({ error: 'no target seg' });
+      var tsg = c.segs[ti];
+      while (tTarget > tsg.start + tsg.dur - 3.5) tTarget -= 1;   // 保证段内 ≥3.5s 不被推进
+      ti = seekTargetSegIdx(c, tTarget); tsg = c.segs[ti];
+      var lo = 0, hi = w, dt = tTarget - seek0;
+      for (var k = 0; k < 24; k++) {
+        var mid = (lo + hi) / 2;
+        if (seekDelta(mid) < dt) lo = mid; else hi = mid;
+      }
+      drag.seek = true; drag.wasPlaying = !!c.playing; drag.seek0 = seek0;
+      drag.seekSeg = seg; drag.seekT = null; drag.seekPrevAt = 0;
+      moveSeek(Math.round((lo + hi) / 2));
+      out.targetIdx = drag.seekTargetSeg;
+      out.tipHasSeg = (c.tipEl && c.tipEl.textContent.indexOf('/') >= 0);
+      if (drag.seekTargetSeg != null && drag.seekTargetSeg !== c.idx) {
+        endSeek();
+        await new Promise(function (res) { setTimeout(res, 2500); });
+        c = activeClip();
+        out.landedIdx = c.idx;
+        out.landedOk = c.idx === ti;
+        var d2 = c.decks[c.activeDeck];            // jumpTo 会翻 deck，重取落位 deck
+        out.inRange = d2.v.currentTime >= tsg.start - 1.2 &&
+                      d2.v.currentTime <= tsg.start + tsg.dur + 1.2;
+      } else { out.landedOk = false; out.landedIdx = c.idx; }
+      // 3) 半屏内仍钳在当前段（不误跳段）
+      c.jumpTo(Math.min(1, c.segs.length - 1));
+      await new Promise(function (res) { setTimeout(res, 2200); });
+      c = activeClip();
+      seg = c.segs[c.idx];
+      d = c.decks[c.activeDeck];
+      seek0 = seg.start + seg.dur * 0.5;
+      d.v.currentTime = seek0;
+      await new Promise(function (res) { setTimeout(res, 400); });
+      seek0 = d.v.currentTime;
+      drag.seek = true; drag.wasPlaying = false; drag.seek0 = seek0;
+      drag.seekSeg = seg; drag.seekT = null; drag.seekPrevAt = 0;
+      moveSeek(Math.round(h * 0.96));
+      out.innerClamped = drag.seekT >= seg.start - 0.01 && drag.seekT <= seg.start + seg.dur + 0.01;
+      out.innerNoSeg = drag.seekTargetSeg == null;
+      cancelSeek();
+      return JSON.stringify(out);
+    })()
+    """, timeout_s=90)
+    ok = (r.get("zero") and r.get("span") and r.get("mono") and r.get("c1")
+          and r.get("faster") and r.get("landedOk") and r.get("inRange")
+          and r.get("innerClamped") and r.get("innerNoSeg"))
+    return ok, json.dumps(r, ensure_ascii=False)
+
+
 @case("reverse-direction", "倒放方向模型：◀▶ 切方向、暂停态播放键箭头跟随、revReset 复位")
 def t_reverse_direction(s, ctx):
     r = jev(s, """

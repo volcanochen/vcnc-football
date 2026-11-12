@@ -147,8 +147,9 @@ var POS_KEY = 'vcnc.pos.v1';
 var COOKIE_KEY = 'vcnc.cookie.v1';
 var FEED_CACHE_KEY = 'vcnc.feedcache.v1';
 var QN_KEY = 'vcnc.qn.v1';
-/* 画质档位跨启动保持：默认 1080P；大会员可在左侧账号浮窗里切换，
-   切换会保存进度并重载（不同 qn 的媒体缓存 key 天然隔离，不会串流）。 */
+/* 画质档位跨启动保持：默认 1080P；任何登录态都能在左侧账号浮窗切换
+   （基础档 360P~1080P 不需要大会员，未登录点高档时 B 站自动降级到
+   可见最高档），切换会保存进度并重载（不同 qn 的媒体缓存 key 天然隔离）。 */
 function readQn() {
   var v = parseInt(safeGet(QN_KEY), 10);
   return (v >= 6 && v <= 127) ? v : 80;
@@ -485,6 +486,11 @@ ClipPlayer.prototype.resolve = async function () {
     if (!j.ok) throw new Error(j.error || '解析失败');
     this.token = j.token;
     this.info = j;
+    // 风控降级：后端回放上次成功解析，媒体字节全走本地磁盘缓存。
+    // 此时绝不能再发预取请求（未缓存区间会因签名过期 403，且会额外打扰 B 站）。
+    this.degraded = !!j.degraded;
+    if (this.degraded) toast('B 站接口受限，正在用本地缓存播放（未缓存片段可能加载失败）');
+    this.riskUntil = 0;
     this.videoDuration = j.duration || 0;
     this.hasAudio = !!(j.audio && j.audio.id);
     calibLoad(this.item.bvid);          // 有缓存的对齐立即生效于片段映射
@@ -494,13 +500,19 @@ ClipPlayer.prototype.resolve = async function () {
     this.error = '';
     if (page === 2) { renderCatTokens(); updateCatCount(); }   // 设置页开着时刷新候选/命中数
     renderSegFloat(true);
-    diag('resolve ok ' + this.item.bvid + ' segs=' + this.segs.length);
+    diag('resolve ok ' + this.item.bvid + ' segs=' + this.segs.length
+      + (this.degraded ? ' (degraded)' : ''));
     this.render();
-    prefetchSegBytes(this);          // 后台预取本场全部集锦片段的字节区间
+    if (!this.degraded) prefetchSegBytes(this);   // 后台预取本场全部集锦片段的字节区间
     return true;
   } catch (e) {
     this.state = 'error';
     this.error = (e && e.message) || String(e);
+    // 服务端已按 IP 冷却短路，前端也把「重试」按钮按住，避免连点把窗口打热
+    var rm = /(\d+)\s*秒/.exec(this.error);
+    if (/风控|冷却|受限/.test(this.error) && rm) {
+      this.riskUntil = Date.now() + parseInt(rm[1], 10) * 1000;
+    }
     diag('resolve fail ' + this.item.bvid + ': ' + this.error);
     this.render();
     return false;
@@ -890,6 +902,11 @@ ClipPlayer.prototype.loadExtTracks = function () {
 };
 
 ClipPlayer.prototype.retry = function () {
+  if (this.riskUntil && Date.now() < this.riskUntil) {
+    toast('B 站接口冷却中，请 ' + Math.ceil((this.riskUntil - Date.now()) / 1000) + ' 秒后再试');
+    return;
+  }
+  this.riskUntil = 0;
   this.stopAll();
   this.state = 'idle';
   this.error = '';
@@ -899,7 +916,9 @@ ClipPlayer.prototype.retry = function () {
 ClipPlayer.prototype.onDeckError = function () {
   if (!this.active || this.state !== 'ready') return;
   this.state = 'error';
-  this.error = '视频流中断，请重试';
+  this.error = this.degraded
+    ? '本地缓存没有这段画面，请等接口恢复后重试'
+    : '视频流中断，请重试';
   this.playing = false;
   this.render();
 };
@@ -3596,7 +3615,7 @@ function bindGestures() {
     drag.inFeed = (page === 1 && active >= 0);
     drag.x0 = e.clientX; drag.y0 = e.clientY;
     drag.y = 0; drag.dx = 0; drag.vx = 0; drag.axis = null; drag.mode = null;
-    drag.seek = false; drag.seekT = null; drag.seekSeg = null;
+    drag.seek = false; drag.seekT = null; drag.seekSeg = null; drag.seekTargetSeg = null;
     drag.bright0 = SETTINGS.brightness; drag.vol0 = SETTINGS.volume;
     drag.wasPlaying = false;
     drag.moved = false; drag.t0 = performance.now(); drag.vy = 0;
@@ -3916,37 +3935,102 @@ function slideAdjust(mode, dy) {
 
 /* ---------- 单指横滑快进 / 回退（播放页） ----------
    拖动期间整体暂停（对暂停的元素 seek 稳得多，修真机「回退后画面冻住」），
-   预览帧照常跟手；时间变化不弹居中 OSD，直接显示在底部进度条上（圆点 + 气泡）。 */
-var SEEK_SPAN = 90;        // 拖满一屏宽 = ±90 秒
+   预览帧照常跟手；时间变化不弹居中 OSD，直接显示在底部进度条上（圆点 + 气泡）。
+
+   非线性速度（2026-11-13）：半屏内线性（段内精调，拖满半屏 = ±45s）；
+   超过半屏进入加速区，速度按二次曲线从线性末速平滑拉升（终点约 38×），
+   拖满整屏 = ±(SEEK_SPAN/2 + SEEK_FAR_SPAN) 秒，且**允许跨段**直达全场
+   任意进度——松手时落点不在当前段就走 jumpTo（带段内偏移），落在段间
+   空隙归到左侧段。半屏内依旧钳制在当前段内，不破坏原来的精调手感。 */
+var SEEK_SPAN = 90;        // 线性区：拖满一屏宽 = ±90 秒（半屏即 ±45）
+var SEEK_FAR_SPAN = 600;   // 加速区：从半屏拖到整屏额外再走 ±600 秒
+/** 屏幕位移 px → 时间增量 s。分段：|dx|≤半屏线性；之后二次加速，C1 连续 */
+function seekDelta(dxs) {
+  var w = window.innerWidth || 1;
+  var h = w / 2;
+  var a = Math.abs(dxs);
+  var k1 = SEEK_SPAN / w;                 // 线性区：每 px 秒数
+  if (a <= h) return dxs * k1;
+  var sgn = dxs < 0 ? -1 : 1;
+  var u = Math.min(1, (a - h) / (w - h)); // 加速区进度 0..1
+  var v1h = k1 * h;                       // 半屏位移对应秒数 = SEEK_SPAN/2
+  // 速度 v(u)=k1*(1+A*u²)：起点接线性末速，∫凑满 SEEK_FAR_SPAN → A=3*(SPAN/v1h-1)
+  var A = 3 * (SEEK_FAR_SPAN / v1h - 1);
+  var extra = v1h * (u + (A / 3) * u * u * u);
+  return sgn * (v1h + extra);
+}
+/** 拖动落点所在段序号（可能不是当前段）；落在段间空隙归到左侧段 */
+function seekTargetSegIdx(c, t) {
+  if (!c || !c.segs || !c.segs.length) return null;
+  var last = -1;
+  for (var i = 0; i < c.segs.length; i++) {
+    var s = c.segs[i];
+    if (t <= s.start + s.dur) {
+      if (t >= s.start - 0.01) return i;
+      break;                              // 落在本段之前的空隙 → 归左侧段
+    }
+    last = i;
+  }
+  return last >= 0 ? last : 0;
+}
 function moveSeek(dxs) {
   var seg = drag.seekSeg;
   if (!seg || !drag.seek) return;
-  var w = window.innerWidth || 1;
-  var target = clamp(drag.seek0 + dxs / w * SEEK_SPAN, seg.start, seg.start + seg.dur);
+  var c = activeClip();
+  var dt = seekDelta(dxs);
+  var target = drag.seek0 + dt;
+  var far = Math.abs(dxs) > (window.innerWidth || 1) / 2;
+  if (far) {
+    // 加速区：钳到全片时间轴，允许跨段
+    if (c && c.segs.length) {
+      target = clamp(target, c.segs[0].start, c.segs[c.segs.length - 1].start + c.segs[c.segs.length - 1].dur);
+    }
+    drag.seekTargetSeg = seekTargetSegIdx(c, target);
+  } else {
+    // 线性区：行为与旧版一致，钳在当前段内精调
+    target = clamp(target, seg.start, seg.start + seg.dur);
+    drag.seekTargetSeg = null;
+  }
   drag.seekT = target;
-  // 跟手预览：节流 120ms，只 seek 视频（音频松手再对齐），拖动中就能看到画面在走
-  var now = performance.now();
-  if (now - (drag.seekPrevAt || 0) > 120) {
-    drag.seekPrevAt = now;
-    var cp = activeClip();
-    // 倒放抓帧中：active deck 是抓帧 deck，预览 seek 会打断抓帧流水线，跳过跟手预览
-    if (cp && cp.state === 'ready' && !rg.on) {
-      try { cp.decks[cp.activeDeck].v.currentTime = target; } catch (e) {}
+  // 跟手预览：节流 120ms，只 seek 视频（音频松手再对齐），拖动中就能看到画面在走。
+  // 跨段不预览：deck 硬切流水线不能在拖动中打断，松手 endSeek 统一 jumpTo
+  if (drag.seekTargetSeg == null || drag.seekTargetSeg === c.idx) {
+    var now = performance.now();
+    if (now - (drag.seekPrevAt || 0) > 120) {
+      drag.seekPrevAt = now;
+      var cp = c;
+      // 倒放抓帧中：active deck 是抓帧 deck，预览 seek 会打断抓帧流水线，跳过跟手预览
+      if (cp && cp.state === 'ready' && !rg.on) {
+        try { cp.decks[cp.activeDeck].v.currentTime = target; } catch (e) {}
+      }
     }
   }
   seekBarShow(target);
 }
 function endSeek() {
   var seg = drag.seekSeg, t0 = drag.seek0, t1 = drag.seekT;
+  var ti = drag.seekTargetSeg;
   var wasPlaying = drag.wasPlaying;
   drag.wasPlaying = false;
   drag.seek = false;
   drag.seekT = null;
   drag.seekSeg = null;
+  drag.seekTargetSeg = null;
   seekBarHide();
   var c = activeClip();
   if (!c || c.state !== 'ready' || c.idx < 0 || t1 == null || seg == null) {
     restoreAfterSeek(c, wasPlaying);
+    return;
+  }
+  // 加速区跨段落点：走 jumpTo（段内偏移用 seekOffset 秒），busy 时 jumpTo
+  // 自己会排队（user 标记）；jumpTo 完成后按拖动前的播放状态复位。
+  // 偏移钳离段尾 0.8s：落点压在段末会被段末推进立刻切走（「拖 A 播 A+1」）
+  if (ti != null && ti !== c.idx && c.segs[ti]) {
+    var tseg = c.segs[ti];
+    var off = clamp(t1 - tseg.start, 0, Math.max(0, tseg.dur - 0.8));
+    c.jumpTo(ti, { user: true, seekOffset: off > 0.3 ? off : 0 })
+      .then(function () { if (!wasPlaying) c.pauseAll(); });
+    showChrome();
     return;
   }
   var moved = Math.abs(t1 - t0) >= 0.3;
@@ -3967,10 +4051,16 @@ function endSeek() {
 /** 拖动被打断（pointercancel）：停在最后预览位置并恢复播放状态 */
 function cancelSeek() {
   var t1 = drag.seekT, wasPlaying = drag.wasPlaying;
+  var ti = drag.seekTargetSeg;
   drag.wasPlaying = false;
-  drag.seek = false; drag.seekT = null; drag.seekSeg = null;
+  drag.seek = false; drag.seekT = null; drag.seekSeg = null; drag.seekTargetSeg = null;
   seekBarHide();
   var c = activeClip();
+  // 跨段意图被系统打断（来电/浏览器接管）：落点退回当前段内，不半途切段
+  if (c && ti != null && ti !== c.idx && c.segs[c.idx]) {
+    var segNow = c.segs[c.idx];
+    t1 = clamp(t1 != null ? t1 : segNow.start, segNow.start, segNow.start + segNow.dur);
+  }
   if (c && c.state === 'ready' && t1 != null && c.idx >= 0) {
     if (rg.on) {
       rg.lastPos = t1;                 // 倒放抓帧中：位置走 rg.lastPos，别碰抓帧 deck
@@ -4012,7 +4102,10 @@ function seekBarShow(target) {
     var sign = delta >= 0 ? '+' : '−';
     var b = c.tipEl.querySelector('b'), sp = c.tipEl.querySelector('span');
     if (b) b.textContent = sign + Math.abs(delta).toFixed(1) + 's';
-    if (sp) sp.textContent = fmt(toOrig(target));   // 显示原始（烧录）时间
+    var ts = (typeof drag.seekTargetSeg === 'number') ? drag.seekTargetSeg : null;
+    // 跨段落点：附上目标段序号，明确「松手会跳到哪一段」
+    if (sp) sp.textContent = fmt(toOrig(target)) +
+      (ts != null && c.segs.length ? ' · 段' + (ts + 1) + '/' + c.segs.length : '');
     c.tipEl.style.left = (clamp(p, 0.1, 0.9) * 100).toFixed(2) + '%';
     c.tipEl.style.display = 'block';
   }

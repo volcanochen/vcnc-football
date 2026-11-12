@@ -24,6 +24,19 @@
   var FOLD_KEY = 'vcnc.social.fold.v1';
   var COOKIE_KEY = 'vcnc.cookie.v1';
 
+  /* 基础画质档：360P~1080P 不需要大会员，任何登录态都可请求。
+     B 站 accept_quality 对游客只返回低档，前端固定并上这几档，
+     保证「切换画质」任何时候都能点到 1080P（游客请求高档时 B 站
+     自动下发可见的最高档，登录后同档位即生效）。 */
+  var BASE_QNS = [
+    { qn: 80, name: '1080P' },
+    { qn: 64, name: '720P' },
+    { qn: 32, name: '480P' },
+    { qn: 16, name: '360P' }
+  ];
+  var QN_NAMES = { 6: '240P', 16: '360P', 32: '480P', 64: '720P', 74: '1080P60',
+                   80: '1080P', 112: '1080P 高码率', 116: '1080P60', 120: '4K' };
+
   function $(s, r) { return (r || document).querySelector(s); }
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -248,34 +261,41 @@
 
     bodyEl.innerHTML = '';
 
-    // 画质（始终显示，非大会员置灰；无视频时给占位提示）
+    // 画质（始终显示、人人可点：基础档不需要大会员；列表 = B 站
+    // accept_quality ∪ 基础档位 ∪ 当前请求档，保证高档位不被藏掉）
     var qsBox = el('div', 'soc-qs');
-    var list = st.qualityList || [];
-    if (!list.length) {
-      qsBox.appendChild(el('div', 'soc-q-empty', '视频载入后显示可选画质'));
-    } else {
-      list.forEach(function (item) {
-        var qn = parseInt(item.qn, 10);
-        var on = (qn === parseInt(st.qn, 10));
-        var b = makeBtn('soc-q' + (on ? ' on' : ''), qName(item),
-                        !me.vip, function () {
-          if (!me.vip) { tip('切换画质需要 B 站大会员'); return; }
-          if (on) { tip('已经是 ' + (item.name || qn)); return; }
-          lsSet(QN_KEY, String(qn));
-          tip('正在切换到 ' + (item.name || qn) + '…');
-          setTimeout(function () { callVCNC('setQuality', qn); }, 120);
-        });
-        qsBox.appendChild(b);
-      });
+    var list = (st.qualityList || []).slice();
+    var seen = {};
+    list.forEach(function (it) { seen[parseInt(it.qn, 10)] = 1; });
+    BASE_QNS.forEach(function (b) {
+      if (!seen[b.qn]) { list.push({ qn: b.qn, name: b.name }); seen[b.qn] = 1; }
+    });
+    var curQn = parseInt(st.qn, 10);
+    if (curQn && !seen[curQn]) {
+      list.push({ qn: curQn, name: QN_NAMES[curQn] || ('QN ' + curQn) });
+      seen[curQn] = 1;
     }
+    // 高亮跟随实际播放画质：B 站对无权限档位静默降级（如游客点 1080P
+    // 实际拿到 480P），高亮落在真实档位上，比停在请求档更诚实
+    var shownQn = parseInt(st.quality, 10) || curQn;
+    if (shownQn && !seen[shownQn]) {
+      list.push({ qn: shownQn, name: QN_NAMES[shownQn] || ('QN ' + shownQn) });
+      seen[shownQn] = 1;
+    }
+    list.sort(function (a, b) { return parseInt(b.qn, 10) - parseInt(a.qn, 10); });
+    list.forEach(function (item) {
+      var qn = parseInt(item.qn, 10);
+      var on = (qn === shownQn);
+      var b = makeBtn('soc-q' + (on ? ' on' : ''), qName(item), false, function () {
+        if (on) { tip('已经是 ' + qName(item)); return; }
+        lsSet(QN_KEY, String(qn));
+        tip('正在切换到 ' + qName(item) + '…');
+        setTimeout(function () { callVCNC('setQuality', qn); }, 120);
+      });
+      qsBox.appendChild(b);
+    });
     bodyEl.appendChild(qsBox);
 
-    if (!me.vip) {
-      var h = el('div', 'soc-hint');
-      h.appendChild(document.createTextNode('切换画质需'));
-      h.appendChild(el('b', '', '大会员'));
-      bodyEl.appendChild(h);
-    }
     if (stateText) bodyEl.appendChild(el('div', stateClass, stateText));
   }
 
@@ -596,8 +616,7 @@
       .then(function () {
         me = { loggedIn: false, vip: false, name: '', face: '', level: 0, coins: 0, mid: 0 };
         stateText = ''; lastSig = ''; render(true);
-        // 画质回落：大会员专属档位对游客不可用，重新取流
-        lsDel(QN_KEY);
+        // 保留画质选择：基础档未登录也可用，重新取流即可
         tip('已退出登录（B 站其它设备不受影响）');
         callVCNC('reload');
       })

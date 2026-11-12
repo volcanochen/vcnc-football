@@ -296,6 +296,168 @@ return out;
     static String buvidCookie = "";
     static long buvidTs = 0;
 
+    // ---------------------------------------------------------------- B 站风控断路器
+    /**
+     * -352 / -412 / -403 / -509 与 HTTP 412/429 都是 B 站对**出口 IP** 的滑动窗口限流，
+     * 不是网络故障。瞬时重试（旧版 playurl 零间隔连打两次）只会把窗口继续加热，
+     * 实测能把封锁从几十秒拉长到数分钟。
+     *
+     * 策略：所有 API 响应在 httpGetString 里统一识别，命中即拉起全局冷却；
+     * 冷却期内一个包都不发，直接回退到「上次成功解析的快照」（本地磁盘缓存字节仍可播），
+     * 或给用户一条明确的等待时间。冷却随连续命中次数阶梯拉长。
+     */
+    static final int[] RISK_CODES = {-352, -412, -403, -509};
+    static final java.util.regex.Pattern CODE_RE =
+            java.util.regex.Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
+    static final long[] RISK_COOLDOWN = {0, 30_000, 60_000, 120_000, 300_000};
+    static volatile long riskUntil = 0;
+    static volatile int riskStreak = 0;
+
+    static boolean isRiskCode(int c) {
+        for (int x : RISK_CODES) if (x == c) return true;
+        return false;
+    }
+
+    static synchronized void markRisk(String why) {
+        long now = System.currentTimeMillis();
+        if (now >= riskUntil) riskStreak = 0;   // 上一轮已冷却完，重新计数
+        riskStreak = Math.min(riskStreak + 1, RISK_COOLDOWN.length - 1);
+        riskUntil = Math.max(riskUntil, now + RISK_COOLDOWN[riskStreak]);
+        Log.w(TAG, "风控冷却 +" + (RISK_COOLDOWN[riskStreak] / 1000) + "s (" + why + ")");
+    }
+
+    static long riskSeconds() {
+        long left = riskUntil - System.currentTimeMillis();
+        return left > 0 ? (left + 999) / 1000 : 0;
+    }
+
+    static boolean riskBlocked() { return riskSeconds() > 0; }
+
+    /** 唯一的 HTTP 出口上统一识别风控响应，避免每个调用点各写一套判断 */
+    static void noteResponse(String body) {
+        if (body == null || body.isEmpty()) return;
+        String head = body.substring(0, Math.min(body.length(), 256));
+        java.util.regex.Matcher m = CODE_RE.matcher(head);
+        if (m.find()) {
+            try {
+                int c = Integer.parseInt(m.group(1));
+                if (isRiskCode(c)) markRisk("code=" + c);
+            } catch (NumberFormatException ignore) {}
+        } else if (head.contains("request was banned")) {
+            markRisk("banned");
+        }
+    }
+
+    // ---------------------------------------------------------------- 解析快照（风控期仍能播）
+    /**
+     * 每次解析成功，把结果 + 流地址落一份到应用私有目录。风控命中时重新登记一个新 token
+     * 指向同一组地址：MediaCache 的 key 是 bvid|page|qn|kind，与 token 无关，
+     * 所以已缓存的字节全部本地命中，整个过程对 B 站 0 次 API 请求。
+     * 只存公开视频流地址（含短时签名），不存任何账号凭证。
+     */
+    static java.io.File snapshotFile = null;
+    static final Object snapLock = new Object();
+    static final Map<String, JSONObject> SNAP = new ConcurrentHashMap<>();
+
+    /** ProxyServer 构造时调用，传入应用私有 filesDir */
+    public static void init(java.io.File dir) {
+        try {
+            snapshotFile = new java.io.File(dir, "resolve_snapshot.json");
+            if (!snapshotFile.isFile()) return;
+            java.io.FileInputStream fin = new java.io.FileInputStream(snapshotFile);
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = fin.read(buf)) > 0) bo.write(buf, 0, n);
+            fin.close();
+            JSONObject all = new JSONObject(bo.toString("UTF-8"));
+            for (Iterator<String> it = all.keys(); it.hasNext(); ) {
+                String k = it.next();
+                JSONObject o = all.optJSONObject(k);
+                if (o != null) SNAP.put(k, o);
+            }
+            Log.i(TAG, "resolve snapshot loaded: " + SNAP.size());
+        } catch (Exception e) { Log.w(TAG, "resolve snapshot load failed: " + e); }
+    }
+
+    static void persistSnapshots() {
+        java.io.File f = snapshotFile;
+        if (f == null) return;
+        synchronized (snapLock) {
+            try {
+                JSONObject all = new JSONObject();
+                for (Map.Entry<String, JSONObject> e : SNAP.entrySet()) all.put(e.getKey(), e.getValue());
+                java.io.File tmp = new java.io.File(f.getParentFile(), "resolve_snapshot.tmp");
+                java.io.FileOutputStream out = new java.io.FileOutputStream(tmp);
+                out.write(all.toString().getBytes("UTF-8"));
+                out.close();
+                if (!tmp.renameTo(f)) tmp.delete();
+            } catch (Exception e) { Log.w(TAG, "resolve snapshot save failed: " + e); }
+        }
+    }
+
+    static void saveSnapshot(String key, JSONObject out, MediaEntry me) {
+        try {
+            JSONObject s = new JSONObject(out.toString());
+            JSONArray av = new JSONArray();
+            for (String u : me.v) av.put(u);
+            JSONArray aa = new JSONArray();
+            for (String u : me.a) aa.put(u);
+            s.put("v", av);
+            s.put("a", aa);
+            s.put("snapTs", System.currentTimeMillis());
+            SNAP.put(key, s);
+            if (SNAP.size() > 24) {
+                String oldest = null;
+                long ts = Long.MAX_VALUE;
+                for (Map.Entry<String, JSONObject> e : SNAP.entrySet()) {
+                    long t = e.getValue().optLong("snapTs", 0);
+                    if (t < ts) { ts = t; oldest = e.getKey(); }
+                }
+                if (oldest != null) SNAP.remove(oldest);
+            }
+            persistSnapshots();
+        } catch (Exception e) { Log.w(TAG, "saveSnapshot: " + e); }
+    }
+
+    static JSONObject restoreResolve(String key, String reason) {
+        JSONObject s = SNAP.get(key);
+        if (s == null) return null;
+        try {
+            String token = UUID.randomUUID().toString().replace("-", "");
+            MediaEntry me = new MediaEntry();
+            JSONArray av = s.optJSONArray("v"), aa = s.optJSONArray("a");
+            if (av != null) for (int i = 0; i < av.length(); i++) me.v.add(av.optString(i));
+            if (aa != null) for (int i = 0; i < aa.length(); i++) me.a.add(aa.optString(i));
+            me.bvid = s.optString("bvid", "");
+            me.page = s.optInt("page", 1);
+            me.qn = s.optInt("qn", 80);
+            if (me.bvid.isEmpty() || me.v.isEmpty()) return null;
+            MEDIA.put(token, me);
+            JSONObject out = new JSONObject(s.toString());
+            out.remove("v"); out.remove("a"); out.remove("snapTs");
+            out.put("token", token);
+            out.put("degraded", true);
+            out.put("degradedReason", reason);
+            out.put("retryAfter", riskSeconds());
+            Log.i(TAG, "resolve 降级回放 " + key + "（本地缓存字节可播，0 API 请求）");
+            return out;
+        } catch (Exception e) { return null; }
+    }
+
+    /** 风控失败统一出口：有快照就降级回放，没有就给带等待时间的明确提示 */
+    static JSONObject degrade(String cacheKey, String message) {
+        JSONObject snap = restoreResolve(cacheKey, message);
+        if (snap != null) return snap;
+        long sec = riskSeconds();
+        if (sec > 0) throw new RuntimeException("B 站接口风控中，请 " + sec
+                + " 秒后再试（可切换 WiFi/蜂窝换出口 IP，或授权登录 B 站账号提高配额）");
+        throw new RuntimeException(message);
+    }
+
+    /** 取缓存的游客指纹，不发网络请求（resolve 的 view/spi/nav 要立刻带上登录态） */
+    static String cachedBuvid() { return buvidCookie; }
+
     static class MediaEntry {
         List<String> v = new ArrayList<>();
         List<String> a = new ArrayList<>();
@@ -397,6 +559,12 @@ return out;
             if (headers != null) for (Map.Entry<String, String> e : headers.entrySet())
                 c.setRequestProperty(e.getKey(), e.getValue());
             int code = c.getResponseCode();
+            // B 站风控也会直接回 HTTP 412（body 不是 JSON），必须在这里拦下来，
+            // 否则调用方 new JSONObject(html) 只会抛一句莫名其妙的解析错误。
+            if (code == 412 || code == 429) {
+                markRisk("HTTP " + code);
+                throw new java.io.IOException("B 站风控 HTTP " + code);
+            }
             InputStream in = (code >= 200 && code < 300) ? c.getInputStream() : c.getErrorStream();
             StringBuilder sb = new StringBuilder();
             if (in != null) {
@@ -408,6 +576,7 @@ return out;
             String body = sb.toString();
             // 接口 JSON 字节也计入流量（相对视频很小，但「一共用多少」要算上）
             try { NetMeter.addNetwork(body.getBytes("UTF-8").length); } catch (Exception ignore) {}
+            noteResponse(body);   // 统一风控识别（code=-352/-412/... 或 banned 文案）
             return body;
         } finally {
             try { c.disconnect(); } catch (Exception ignore) {}
@@ -651,10 +820,19 @@ return host != null && (host.contains("estgoss") || host.contains("mirroralib"))
             return cached;
         }
 
+        // 断路器：冷却期内不再向 B 站发一个包，优先回放上次成功的解析结果。
+        if (riskBlocked()) {
+            Log.i(TAG, "resolve " + bvid + " 风控冷却中，剩 " + riskSeconds() + "s");
+            return degrade(cacheKey, "风控冷却中");
+        }
+
         String viewUrl = bvid.toLowerCase().startsWith("av")
                 ? "https://api.bilibili.com/x/web-interface/view?aid=" + bvid.substring(2)
                 : "https://api.bilibili.com/x/web-interface/view?bvid=" + bvid;
-        Map<String, String> h = apiHeaders(null);
+        // 旧版只有 playurl 带登录 Cookie，view / spi / nav 全是游客请求 —— 登录态配额
+        // 白白浪费，且游客请求最容易吃 -352。整条解析链路共用同一份凭证。
+        String authCookie = (cachedBuvid() + " " + (cookieUser == null ? "" : cookieUser.trim())).trim();
+        Map<String, String> h = apiHeaders(authCookie.isEmpty() ? null : authCookie);
 
         // 并行抓取三个互不依赖的请求：view / buvid(spi) / wbi(nav)，把 4 次串行往返压成 2 批
         final long[] ms = new long[3];
@@ -668,6 +846,8 @@ return host != null && (host.contains("estgoss") || host.contains("mirroralib"))
                     // 抖动时首连直接失败）。只重试一次不够，改为指数退避重试 3 次。
                     Exception last = e1;
                     for (int attempt = 1; attempt <= 3; attempt++) {
+                        // HTTP 412 已经把断路器拉起，再重试只会加热 IP 窗口
+                        if (riskBlocked()) throw last;
                         try { Thread.sleep(300L * attempt); } catch (Exception ignore) {}
                         try { return httpGetString(viewUrl, h); }
                         catch (Exception e2) {
@@ -684,6 +864,7 @@ public String call() throws Exception {
 long s = System.currentTimeMillis();
 try { return httpGetString("https://api.bilibili.com/x/frontend/finger/spi", h); }
 catch (Exception e1) {
+if (riskBlocked()) throw e1;   // 冷却期不再补发
 Log.w(TAG, "spi fetch failed (" + e1 + "), retry once");
 try { Thread.sleep(300); } catch (Exception ignore) {}
 return httpGetString("https://api.bilibili.com/x/frontend/finger/spi", h);
@@ -696,6 +877,7 @@ public String call() throws Exception {
 long s = System.currentTimeMillis();
 try { return httpGetString("https://api.bilibili.com/x/web-interface/nav", h); }
 catch (Exception e1) {
+if (riskBlocked()) throw e1;   // 冷却期不再补发
 Log.w(TAG, "nav fetch failed (" + e1 + "), retry once");
 try { Thread.sleep(300); } catch (Exception ignore) {}
 return httpGetString("https://api.bilibili.com/x/web-interface/nav", h);
@@ -713,6 +895,7 @@ catch (Exception e) {
             // 「网络超时」，无法判断是网络真不通、还是被 18s 阈值砍掉了。
             // 这里的 30s 覆盖了 view 请求内部的重试（共 3 次尝试）+ 退避等待。
             Log.w(TAG, "view fetch failed: " + e);
+            if (riskBlocked()) return degrade(cacheKey, "取视频信息遇到风控");
             throw new RuntimeException(e instanceof TimeoutException
                     ? "取视频信息超时（网络太慢或 B 站接口无响应），请稍后重试或切到 WiFi"
                     : "取视频信息失败：" + (e.getMessage() == null ? e.toString() : e.getMessage()));
@@ -721,21 +904,17 @@ catch (Exception e) {
         try { navBody = fNav.get(15, TimeUnit.SECONDS); } catch (Exception ignore) {}
 
         JSONObject view = new JSONObject(viewBody);
-        if (view.optInt("code") != 0)
-            throw new RuntimeException("取视频信息失败：" + view.optString("message"));
+        if (view.optInt("code") != 0) {
+            String msg = "取视频信息失败：" + view.optString("message");
+            if (isRiskCode(view.optInt("code")) || riskBlocked()) return degrade(cacheKey, msg);
+            throw new RuntimeException(msg);
+        }
         JSONObject v = view.getJSONObject("data");
 
-        // 评论与时间戳：与 playurl 并行抓取（仅依赖 aid），内联进解析结果，省掉前端二次请求
+        // 评论与时间戳：只在 playurl 成功之后再发（旧版与 playurl 并行，
+        // 一次 resolve 会同时打出 5 个评论页请求，风控窗口很容易被这波突发打热）。
         final String aidStr = String.valueOf(v.optLong("aid"));
-        Future<JSONObject> fReplies = POOL.submit(new Callable<JSONObject>() {
-            public JSONObject call() throws Exception {
-                JSONArray r = fetchReplies(aidStr, 5, 20);
-                JSONObject o = new JSONObject();
-                o.put("count", r.length());
-                o.put("matched", extractTimestamps(r));
-                return o;
-            }
-        });
+        Future<JSONObject> fReplies = null;
 
         JSONArray pages = v.optJSONArray("pages");
         if (page < 1) page = 1;
@@ -777,21 +956,36 @@ q.put("fourk", "1");
 // 注意：不能加 platform=html5/otype=json —— 那会让 B 站改走 durl(单文件) 而不返回 dash，
 // 导致「该视频未返回 DASH 流」。节点分配主要取决于 UA 与 high_quality。
 q.put("high_quality", "1");
-        String signed = wbiSign(q);
-
         long tp0 = System.currentTimeMillis();
         JSONObject pu = null;
+        // 风控重试必须「拉开间隔 + 刷新指纹 + 重新签名」：wbi 的 wts 是签名的一部分，
+        // 复用同一个 signed 零间隔连打两枪既像脚本又容易过期，只会把 IP 窗口继续加热。
         for (int pa = 0; pa < 2; pa++) {
-            // -352 风控时刷新 buvid 再试一次（登录 cookie 已在 cookie 里）
+            if (pa > 0 && riskBlocked()) break;   // 已命中风控：冷却期内一包不发
+            if (pa > 0) {
+                try { Thread.sleep(2000); } catch (Exception ignore) {}
+            }
             String playCookie = (pa == 0) ? cookie : (cookie + " " + freshBuvidCookie()).trim();
-            pu = new JSONObject(httpGetString(
-                    "https://api.bilibili.com/x/player/wbi/playurl?" + signed, apiHeaders(playCookie)));
-            if (pu.optInt("code") != -352) break;
-            Log.w(TAG, "playurl -352 风控，刷新 buvid 重试");
+            try {
+                pu = new JSONObject(httpGetString(
+                        "https://api.bilibili.com/x/player/wbi/playurl?" + wbiSign(q),
+                        apiHeaders(playCookie)));
+            } catch (java.io.IOException ioe) {
+                Log.w(TAG, "playurl io: " + ioe);
+                if (riskBlocked() || pa == 1) break;   // HTTP 412 / 被风控掐断
+                continue;
+            }
+            if (!isRiskCode(pu.optInt("code"))) break;
+            Log.w(TAG, "playurl " + pu.optInt("code") + " 风控，刷新 buvid 退避重试 " + (pa + 1));
         }
         long msPu = System.currentTimeMillis() - tp0;
-        if (pu.optInt("code") != 0)
-            throw new RuntimeException("取播放地址失败：" + pu.optString("message"));
+        if (pu == null || pu.optInt("code") != 0) {
+            String msg = "取播放地址失败："
+                    + (pu == null ? "接口被风控拦截" : pu.optString("message"));
+            if (pu == null || isRiskCode(pu.optInt("code")) || riskBlocked())
+                return degrade(cacheKey, msg);
+            throw new RuntimeException(msg);
+        }
         JSONObject data = pu.getJSONObject("data");
         JSONObject dash = data.optJSONObject("dash");
         if (dash == null) throw new RuntimeException("该视频未返回 DASH 流（可能是番剧/直播/付费内容）");
@@ -800,11 +994,26 @@ q.put("high_quality", "1");
         JSONObject as = pickAudio(dash.optJSONArray("audio"));
         if (vs == null) throw new RuntimeException("没有可用的视频流");
 
+        // playurl 成功后再抓评论；冷却期内完全不发这 5 个并发请求。
+        if (!riskBlocked()) {
+            fReplies = POOL.submit(new Callable<JSONObject>() {
+                public JSONObject call() throws Exception {
+                    JSONArray r = fetchReplies(aidStr, 5, 20);
+                    JSONObject o = new JSONObject();
+                    o.put("count", r.length());
+                    o.put("matched", extractTimestamps(r));
+                    return o;
+                }
+            });
+        }
+
         // 收齐并行抓取到的评论/时间戳（失败则降级为空，不阻塞解析）
         JSONObject repObj = new JSONObject();
         repObj.put("count", 0);
         repObj.put("matched", new JSONArray());
-        try { repObj = fReplies.get(12, TimeUnit.SECONDS); } catch (Exception ignore) {}
+        if (fReplies != null) {
+            try { repObj = fReplies.get(12, TimeUnit.SECONDS); } catch (Exception ignore) {}
+        }
 
         String token = UUID.randomUUID().toString().replace("-", "");
         MediaEntry me = new MediaEntry();
@@ -870,6 +1079,7 @@ q.put("high_quality", "1");
         if (RESOLVE_CACHE.size() > 64) { RESOLVE_CACHE.clear(); RESOLVE_TS.clear(); }
         RESOLVE_CACHE.put(cacheKey, out);
         RESOLVE_TS.put(cacheKey, new long[]{System.currentTimeMillis()});
+        saveSnapshot(cacheKey, out, me);   // 风控降级回放的素材（跨进程重启仍有效）
         Log.i(TAG, "resolve " + bvid + " timings(ms): view=" + ms[0] + " buvid=" + ms[1]
                 + " wbi=" + ms[2] + " playurl=" + msPu + " total=" + (System.currentTimeMillis() - t0));
         return out;
@@ -952,6 +1162,13 @@ q.put("high_quality", "1");
             Log.i(TAG, "feed cache HIT offset=" + cacheKey.substring(0, Math.min(8, cacheKey.length())));
             return cached;
         }
+        // 冷却期内连退避重试都不发：把上一轮成功结果（哪怕超过 5 分钟）直接顶上，
+        // 没有就快速失败，让前端用 localStorage 里的列表缓存。
+        if (riskBlocked()) {
+            if (cached != null) { Log.i(TAG, "feed 风控冷却，沿用旧缓存"); return cached; }
+            throw new RuntimeException("动态接口风控冷却中，请 " + riskSeconds()
+                    + " 秒后再试（比赛列表已用本地缓存）");
+        }
         Exception last = null;
         for (int attempt = 0; attempt < 4; attempt++) {
             try {
@@ -959,7 +1176,8 @@ q.put("high_quality", "1");
                 // 快速重试只会让窗口持续发热，退避要拉开：1s/3s/6s
                 if (attempt > 0) Thread.sleep(new long[]{0, 1000, 3000, 6000}[attempt]);
                 JSONObject r = fetchSpaceFeedOnce(off, attempt > 0, userCookie);
-                if (r == null) continue;  // -352，已刷新 buvid，进入下一次重试
+                // 命中风控后断路器已经拉起，继续退避重试只会加热 IP 窗口，直接收手
+                if (r == null) { if (riskBlocked()) break; continue; }
                 if (FEED_CACHE.size() > 32) { FEED_CACHE.clear(); FEED_TS.clear(); }
                 FEED_CACHE.put(cacheKey, r);
                 FEED_TS.put(cacheKey, new long[]{System.currentTimeMillis()});
@@ -981,8 +1199,8 @@ q.put("high_quality", "1");
         String buvid = refreshBuvid ? freshBuvidCookie() : buvidCookie();
         String cookie = (buvid + " " + (userCookie == null ? "" : userCookie.trim())).trim();
         JSONObject d = new JSONObject(httpGetString(u.toString(), feedHeaders(cookie)));
-        if (d.optInt("code") == -352) {
-            Log.w(TAG, "feed -352 风控（refreshBuvid=" + refreshBuvid + "），重试");
+        if (isRiskCode(d.optInt("code"))) {
+            Log.w(TAG, "feed " + d.optInt("code") + " 风控（refreshBuvid=" + refreshBuvid + "），重试");
             return null;
         }
         if (d.optInt("code") != 0)

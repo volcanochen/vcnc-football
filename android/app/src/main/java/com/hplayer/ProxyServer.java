@@ -46,6 +46,8 @@ public class ProxyServer extends Thread {
     public ProxyServer(Context ctx) {
         this.ctx = ctx.getApplicationContext();
         this.cache = MediaCache.get(this.ctx);
+        // 风控降级用的「上次成功解析」快照落在应用私有目录，跨进程重启仍可回放
+        BiliApi.init(this.ctx.getFilesDir());
         // 社交模块凭证读回：放在这里 init，MainActivity / 更新流程都不必感知
         BiliSocial.init(this.ctx);
     }
@@ -114,6 +116,8 @@ public class ProxyServer extends Thread {
                 return BiliApi.resolve(raw, page, qn, cookie);
             } catch (Exception e) {
                 String msg = e.getMessage() == null ? "" : e.getMessage();
+                // 风控错误按定义不可重试：后端已经在冷却，再打三次只会延长封锁
+                if (msg.contains("风控") || msg.contains("冷却")) throw e;
                 boolean retriable = msg.contains("超时") || msg.contains("网络")
                         || e instanceof java.io.IOException;
                 Log.w(TAG, "resolve attempt " + (attempt + 1) + " failed: " + msg);

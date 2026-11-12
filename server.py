@@ -73,6 +73,119 @@ _LAST_COOKIE = {"value": ""}
 
 
 # --------------------------------------------------------------------------
+# B 站风控断路器（与 Android BiliApi 同语义）
+#   -352 / -412 / -403 / -509 与 HTTP 412/429 是出口 IP 的滑动窗口限流，
+#   不是网络故障。瞬时重试只会把窗口继续加热，所以命中即拉起全局冷却，
+#   冷却期内一个包都不发，优先回放「上次成功解析」让本地缓存字节照常可播。
+# --------------------------------------------------------------------------
+RISK_CODES = (-352, -412, -403, -509)
+RISK_COOLDOWN = (0, 30, 60, 120, 300)          # 秒，按连续命中次数阶梯拉长
+PLAYURL_RETRY_DELAY = 2.0                       # 风控后唯一的退避重试间隔（测试可置 0）
+_RISK = {"until": 0.0, "streak": 0}
+_RISK_LOCK = threading.Lock()
+_CODE_RE = re.compile(r'"code"\s*:\s*(-?\d+)')
+
+
+def is_risk_code(code) -> bool:
+    return code in RISK_CODES
+
+
+def mark_risk(why: str = "") -> None:
+    with _RISK_LOCK:
+        now = time.time()
+        if now >= _RISK["until"]:
+            _RISK["streak"] = 0
+        _RISK["streak"] = min(_RISK["streak"] + 1, len(RISK_COOLDOWN) - 1)
+        sec = RISK_COOLDOWN[_RISK["streak"]]
+        _RISK["until"] = max(_RISK["until"], now + sec)
+    if VERBOSE:
+        print(f"[risk] 冷却 +{sec}s ({why})")
+
+
+def risk_seconds() -> int:
+    return max(0, int(_RISK["until"] - time.time() + 0.999))
+
+
+def risk_blocked() -> bool:
+    return risk_seconds() > 0
+
+
+def note_response(body: str) -> None:
+    """在唯一的 HTTP 出口统一识别风控响应。"""
+    head = body[:256]
+    m = _CODE_RE.search(head)
+    if m:
+        if int(m.group(1)) in RISK_CODES:
+            mark_risk("code=" + m.group(1))
+    elif "request was banned" in head:
+        mark_risk("banned")
+
+
+# --------------------------------------------------------------------------
+# 解析快照（风控期仍能播）：只存公开流地址，不存任何账号凭证
+# --------------------------------------------------------------------------
+SNAPSHOT_PATH = os.path.join(ROOT, "_cache", "resolve_snapshot.json")
+_SNAP_LOCK = threading.Lock()
+_SNAP: dict[str, dict] = {}
+
+
+def _load_snapshots() -> None:
+    global _SNAP
+    try:
+        with open(SNAPSHOT_PATH, "r", encoding="utf-8") as f:
+            _SNAP = json.load(f)
+    except Exception:
+        _SNAP = {}
+
+
+_load_snapshots()
+
+
+def save_snapshot(key: str, out: dict, media: dict) -> None:
+    with _SNAP_LOCK:
+        s = dict(out)
+        s["v"] = list(media["v"])
+        s["a"] = list(media["a"])
+        s["snapTs"] = time.time()
+        _SNAP[key] = s
+        if len(_SNAP) > 24:
+            _SNAP.pop(min(_SNAP, key=lambda k: _SNAP[k].get("snapTs", 0)), None)
+        try:
+            os.makedirs(os.path.dirname(SNAPSHOT_PATH), exist_ok=True)
+            tmp = SNAPSHOT_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(_SNAP, f, ensure_ascii=False)
+            os.replace(tmp, SNAPSHOT_PATH)
+        except Exception:
+            pass
+
+
+def restore_resolve(key: str, reason: str):
+    s = _SNAP.get(key)
+    if not s or not s.get("bvid") or not s.get("v"):
+        return None
+    token = uuid.uuid4().hex
+    with _lock:
+        MEDIA[token] = {"v": list(s["v"]), "a": list(s.get("a") or []), "ts": time.time(),
+                        "bvid": s["bvid"], "page": s.get("page", 1), "qn": s.get("qn", 80)}
+    out = {k: v for k, v in s.items() if k not in ("v", "a", "snapTs")}
+    out.update({"token": token, "degraded": True,
+                "degradedReason": reason, "retryAfter": risk_seconds()})
+    return out
+
+
+def degrade(key: str, message: str) -> dict:
+    snap = restore_resolve(key, message)
+    if snap is not None:
+        return snap
+    sec = risk_seconds()
+    if sec > 0:
+        raise RuntimeError(f"B 站接口风控中，请 {sec} 秒后再试"
+                           "（可切换 WiFi/蜂窝换出口 IP，或填写 SESSDATA 提高配额）")
+    raise RuntimeError(message)
+
+
+# --------------------------------------------------------------------------
 # 基础工具
 # --------------------------------------------------------------------------
 def http_json(url: str, cookie: str = "", timeout: int = 20) -> dict:
@@ -80,10 +193,18 @@ def http_json(url: str, cookie: str = "", timeout: int = 20) -> dict:
     if cookie:
         headers["Cookie"] = cookie
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code in (412, 429):
+            mark_risk(f"HTTP {exc.code}")
+            raise RuntimeError(f"B 站风控 HTTP {exc.code}") from exc
+        raise
     NET_METER.add_network(len(body))
-    return json.loads(body.decode("utf-8", "replace"))
+    text = body.decode("utf-8", "replace")
+    note_response(text)
+    return json.loads(text)
 
 
 def http_json_no_origin(url: str, cookie: str = "", timeout: int = 20) -> dict:
@@ -92,10 +213,18 @@ def http_json_no_origin(url: str, cookie: str = "", timeout: int = 20) -> dict:
     if cookie:
         headers["Cookie"] = cookie
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code in (412, 429):
+            mark_risk(f"HTTP {exc.code}")
+            raise RuntimeError(f"B 站风控 HTTP {exc.code}") from exc
+        raise
     NET_METER.add_network(len(body))
-    return json.loads(body.decode("utf-8", "replace"))
+    text = body.decode("utf-8", "replace")
+    note_response(text)
+    return json.loads(text)
 
 
 def mixin_key(orig: str) -> str:
@@ -547,13 +676,31 @@ def resolve(raw_target: str, page: int, qn: int, cookie_user: str) -> dict:
     bvid, bvid_page = parse_target(raw_target)
     if page <= 1:
         page = bvid_page
+    key = f"{bvid.lower()}|{qn}|{page}"
 
-    if bvid.lower().startswith("av"):
-        view = http_json(f"https://api.bilibili.com/x/web-interface/view?aid={bvid[2:]}")
-    else:
-        view = http_json(f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}")
+    # 冷却期内一个包都不发：有快照就降级回放，没有就给明确等待时间
+    if risk_blocked():
+        return degrade(key, "风控冷却中")
+
+    # 旧版只有 playurl 带登录 Cookie，view 是纯游客请求；整条链路共用一份凭证
+    auth_cookie = " ".join(x for x in [(_BUVID.get("cookie") or ""), (cookie_user or "").strip()] if x)
+    try:
+        if bvid.lower().startswith("av"):
+            view = http_json(f"https://api.bilibili.com/x/web-interface/view?aid={bvid[2:]}",
+                             cookie=auth_cookie)
+        else:
+            view = http_json(f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
+                             cookie=auth_cookie)
+    except Exception as exc:                       # noqa: BLE001
+        # HTTP 412 / 429 会在这里抛（body 不是 JSON），view 阶段也要能回放快照
+        if risk_blocked():
+            return degrade(key, f"取视频信息遇到风控：{exc}")
+        raise
     if view.get("code") != 0:
-        raise RuntimeError(f"取视频信息失败：{view.get('message')}（code {view.get('code')}）")
+        msg = f"取视频信息失败：{view.get('message')}（code {view.get('code')}）"
+        if is_risk_code(view.get("code")) or risk_blocked():
+            return degrade(key, msg)
+        raise RuntimeError(msg)
     v = view["data"]
 
     pages = v.get("pages") or []
@@ -561,16 +708,38 @@ def resolve(raw_target: str, page: int, qn: int, cookie_user: str) -> dict:
     cid = pages[page - 1]["cid"] if pages else v["cid"]
     part = pages[page - 1].get("part", "") if pages else ""
 
-    cookie = " ".join(x for x in [buvid_cookie(), cookie_user.strip()] if x)
+    cookie = " ".join(x for x in [buvid_cookie(), (cookie_user or "").strip()] if x)
     _LAST_COOKIE["value"] = cookie
 
-    query = wbi_sign({
-        "bvid": v["bvid"], "cid": cid, "qn": qn, "fnver": 0,
-        "fnval": 4048, "fourk": 1,
-    })
-    pu = http_json("https://api.bilibili.com/x/player/wbi/playurl?" + query, cookie=cookie)
-    if pu.get("code") != 0:
-        raise RuntimeError(f"取播放地址失败：{pu.get('message')}（code {pu.get('code')}）")
+    params = {"bvid": v["bvid"], "cid": cid, "qn": qn, "fnver": 0,
+              "fnval": 4048, "fourk": 1}
+    pu = None
+    for attempt in range(2):
+        if attempt and risk_blocked():
+            break     # 第一枪已命中风控：冷却期内一包不发，刷新 buvid 也救不了 IP 级限流
+        if attempt:
+            # 退避 + 刷新 buvid + 重新签名（wts 是签名的一部分，复用旧签名必失败）
+            time.sleep(PLAYURL_RETRY_DELAY)
+            ck = " ".join(x for x in [fresh_buvid_cookie(), (cookie_user or "").strip()] if x)
+        else:
+            ck = cookie
+        try:
+            pu = http_json("https://api.bilibili.com/x/player/wbi/playurl?" + wbi_sign(params),
+                           cookie=ck)
+        except Exception as exc:                       # noqa: BLE001
+            if risk_blocked():
+                break
+            if attempt:
+                raise RuntimeError(f"取播放地址失败：{exc}") from exc
+            continue
+        if pu.get("code") == 0 or not is_risk_code(pu.get("code")):
+            break
+        # -352 命中后断路器已拉起，最多再退避刷指纹试一次，不继续加热窗口
+    if pu is None or pu.get("code") != 0:
+        msg = "取播放地址失败：" + (str(pu.get("message")) if pu else "接口被风控拦截")
+        if pu is None or is_risk_code(pu.get("code")) or risk_blocked():
+            return degrade(key, msg)
+        raise RuntimeError(msg)
     data = pu["data"]
     dash = data.get("dash")
     if not dash:
@@ -582,16 +751,17 @@ def resolve(raw_target: str, page: int, qn: int, cookie_user: str) -> dict:
         raise RuntimeError("没有可用的视频流")
 
     token = uuid.uuid4().hex
+    media = {
+        "v": urls_of(vs), "a": urls_of(as_), "ts": time.time(),
+        "bvid": v["bvid"], "page": page, "qn": qn,
+    }
     with _lock:
-        MEDIA[token] = {
-            "v": urls_of(vs), "a": urls_of(as_), "ts": time.time(),
-            "bvid": v["bvid"], "page": page, "qn": qn,
-        }
+        MEDIA[token] = media
         # 清理 2 小时前的旧 token
         for k in [k for k, val in MEDIA.items() if time.time() - val["ts"] > 7200]:
             MEDIA.pop(k, None)
 
-    return {
+    out = {
         "ok": True,
         "token": token,
         "bvid": v["bvid"],
@@ -612,6 +782,8 @@ def resolve(raw_target: str, page: int, qn: int, cookie_user: str) -> dict:
         "audio": {"id": (as_ or {}).get("id"), "bandwidth": (as_ or {}).get("bandwidth")},
         "loggedIn": bool(re.search(r"SESSDATA=[^;]+", cookie_user or "")),
     }
+    save_snapshot(key, out, media)   # 风控降级回放的素材（跨进程重启仍有效）
+    return out
 
 
 def fresh_buvid_cookie() -> str:
@@ -668,6 +840,11 @@ def space_feed(offset: str, user_cookie: str = "") -> dict:
     hit = _FEED_CACHE.get(key)
     if hit and time.time() - hit[0] < 300:
         return hit[1]
+    # 冷却期内不再发请求：沿用上一轮成功结果（哪怕超过 5 分钟），否则快速失败让前端用本地缓存
+    if risk_blocked():
+        if hit:
+            return hit[1]
+        raise RuntimeError(f"动态接口风控冷却中，请 {risk_seconds()} 秒后再试（比赛列表已用本地缓存）")
     last: Exception | None = None
     for attempt in range(4):
         try:
@@ -680,8 +857,10 @@ def space_feed(offset: str, user_cookie: str = "") -> dict:
             cookie = fresh_buvid_cookie() if attempt else buvid_cookie()
             cookie = (cookie + " " + (user_cookie or "").strip()).strip()
             d = http_json_no_origin(url, cookie=cookie)
-            if d.get("code") == -352:
-                last = RuntimeError("动态接口风控 -352")
+            if is_risk_code(d.get("code")):
+                last = RuntimeError(f"动态接口风控 {d.get('code')}")
+                if risk_blocked():
+                    break          # 断路器已拉起，继续退避重试只会加热 IP 窗口
                 continue
             if d.get("code") != 0 or "data" not in d:
                 raise RuntimeError(f"动态接口失败：{d.get('message')}")
@@ -729,6 +908,13 @@ def space_feed(offset: str, user_cookie: str = "") -> dict:
             return out
         except Exception as exc:  # noqa: BLE001
             last = exc
+            if risk_blocked():
+                break             # HTTP 412 等已在出口拉起冷却，别再退避重试加热窗口
+    if risk_blocked():
+        if hit:
+            return hit[1]         # 冷却期优先沿用上一轮成功结果（哪怕超过 5 分钟）
+        raise RuntimeError(f"动态接口风控冷却中，请 {risk_seconds()} 秒后再试"
+                           "（比赛列表已用本地缓存）")
     raise last or RuntimeError("动态接口风控中（-352），请稍后重试或填写登录 Cookie")
 
 

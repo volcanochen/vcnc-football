@@ -161,7 +161,7 @@ python server.py     # 或双击 start.cmd
 文档链接、双机回归），门禁 FAIL 时禁止发布。一次完整发布：
 
 ```bash
-TAG=v0.3.0   # 本次要发的版本号（改成实际值，UpdateChecker 依赖 vX.Y.Z）
+TAG=v0.4.0   # 本次要发的版本号（改成实际值，UpdateChecker 依赖 vX.Y.Z）
 # 1. 改版本号（AndroidManifest.xml 的 versionCode / versionName），同步 README「当前版本」
 bash android/build_apk.sh
 # 2. 归档产物 + 校验和 + 版本说明
@@ -282,13 +282,15 @@ HUD 贴页签且三项同排一行、画质档位人人可点（列表 = B 站 a
 资源完整性、语法与 Chrome 74 红线、APK 内容/包名/标签/签名、文档链接、
 两端流量与社交接口对齐等静态检查；清单与执行记录见 [发布门禁](RELEASE_GATE.md)。
 
-**v0.3.0 门禁实测**：SM-S9080（S22U，端口 9922）与 SM-N9500（Note8，端口 9923）
-两台设备标准回归各 19/19，`verify_social.js` / `verify_top_row.js` / `verify_tap.js`
-三条专项双机全绿（含物理 `input tap` 的单击隐藏、双击暂停实测）。真机两个老坑照旧：
-S22U 曾因 WiFi 被关导致 offline，`svc wifi enable` 恢复后重跑；Note8 熄屏 Doze 需
-`KEYCODE_WAKEUP` + `KEYCODE_MENU` 亮屏解锁，否则视口 0×0 会让用例大面积假失败。
+**v0.4.0 门禁实测**：SM-S9080（S22U，端口 9922）与 SM-N9500（Note8，端口 9923）
+两台设备标准回归各 **20/20**（含 seek-fast 非线性快拖与集锦用例），
+`verify_social.js`（画质人人可点契约）/ 品牌/分享/流量 / `verify_tap.js` / 集锦验收
+四条专项双机全绿；免设备 `verify_risk_guard.py` 44/44、`verify_clips_codec.js` 36/36。
+合计 **35/35**。真机两个老坑照旧：S22U 曾因 WiFi 被关导致 offline，
+`svc wifi enable` 恢复后重跑；Note8 熄屏 Doze 需 `KEYCODE_WAKEUP` + `KEYCODE_MENU`
+亮屏解锁，否则视口 0×0 会让用例大面积假失败。
 
-> v0.2.5 的记录见 git 历史：品牌化 + 分享区 + 流量计量批次，双机 19/19 + `verify_brand_net.js` 全绿。
+> v0.3.0 的记录见 git 历史：B 站账号社交模块批次，双机 19/19 + 三条专项全绿。
 
 ---
 

@@ -5,3 +5,4 @@ b5433a8696e404add29fb85971c7168a49768bbcaa7437669b0ae7d713699fbf *VCNC-Football-
 1c6f0adf713bc009ddaf1d131eda6113f9fe272bdb5ccc1a534cda93b5c89251 *VCNC-Football-v0.2.4.apk
 5943bb4704c7c0fa75bf5890c9c2af204e9f439a9c6d2be0ea061dd71e5f887c *VCNC-Football-v0.2.5.apk
 3d29f404b6ff4bb2dcb417ccd4ef1fda6fde8e2d6b8da5467728f32530f06229 *VCNC-Football-v0.3.0.apk
+1b467b0930434a5ad86ef67195fb6eca90c6ccb5b55465f64153a614a0254eca  VCNC-Football-v0.4.0.apk

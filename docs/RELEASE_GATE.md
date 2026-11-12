@@ -128,6 +128,7 @@ tag 已打、且 tag 正好指向当前 HEAD 时重跑（发布后复核模式�
 |---|---|---|---|---|
 | **未发版**（自定义集锦，源码 tag 仍 v0.3.0） | 2026-11-12 | **23/24**（唯一 FAIL＝「APK 归档一致」，`android/VCNC-Football.apk` 已含集锦而归档仍是 v0.3.0，属未升版本的预期结果） | **全 PASS**：S22U 19/19 + Note8 19/19；两台的品牌/分享/流量、社交、手势、**集锦**四条专项全绿；合计 **33/34** | 自定义集锦批次。新增静态检查「集锦编解码回归 27 + H5 页 11 项」「集锦模块文件 7 个」，每台真机新增「集锦验收」；`_test/out/gate_clips_final.log` 留档。免设备另跑 `_test/verify_clips_codec.js` 27/27、`_test/verify_share_page.js` 11/11、`_test/verify_social_api.py` 0 失败；GitHub Pages 中转页 `https://volcanochen.github.io/vcnc-football/share/` 已构建到同批 commit 并返回 200；S22U 真机 `vcncfootball://import` 深链成功导入。**未升版本、未归档、未打 tag、未发 Release**，因此门禁按设计输出「禁止发布」 |
 | v0.3.0 | 2026-11-11 | **静态全 PASS** | **全 PASS**（S22U 19/19 + Note8 19/19，社交 / 顶行 / 手势三条专项双机全绿） | B 站账号社交模块 + 顶行重排 + 新手势批次；归档 APK versionCode 8、sha256 见 SHA256SUMS.txt |
+| v0.4.0 | 2026-11-13 | **静态全 PASS**（25 项，含风控韧性回归 44、集锦编解码 36 + H5 页 11、画质开放契约） | **全 PASS**（S22U 20/20 + Note8 20/20，品牌/分享/流量、社交、手势、集锦四条专项双机全绿；合计 **35/35**） | 自定义集锦 + 非线性快拖 + 画质开放 + 风控韧性批次；归档 APK versionCode 9、sha256 `1b467b09…` 见 SHA256SUMS.txt |
 | v0.2.5 | 2026-11-10 | **20/20 PASS** | **4/4 PASS**（S22U 19/19 + Note8 19/19，两台专项验收全绿） | 总计 **24/24 PASS**。品牌化 + 分享区 + 流量计量批次；归档 APK sha256 `5943bb4704c7c0fa…`，V3 签名、三语言标签与自适应图标核对通过 |
 
 首次静态跑出现过 1 项 FAIL：`aapt2 dump badging` 的标签实际带单引号、

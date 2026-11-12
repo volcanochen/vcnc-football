@@ -202,6 +202,38 @@
   cursor: pointer;
 }
 .cs-mini.wide { width: auto; padding: 0 6px; }
+.cs-mini.icon {
+  display: flex; align-items: center; justify-content: center;
+  color: rgba(255, 255, 255, .7);
+}
+.cs-mini.icon:active { background: rgba(0, 174, 236, .45); color: #fff; }
+.cs-mini.on { background: #00aeec; color: #fff; font-weight: 600; }
+/* 可点编辑的文字：虚线下划线提示「点了能改」 */
+.cs-item .editable { cursor: pointer; border-bottom: 1px dashed rgba(255, 255, 255, .35); }
+.cs-item .editable:active { color: #7dd3fc; }
+
+/* 行内编辑态：cs-item 展开为 起点/时长 + 备注 + 保存/取消 */
+.cs-item.editing {
+  height: auto;
+  padding: 6px 0 7px;
+  flex-wrap: wrap;
+}
+.cs-erow { display: flex; align-items: center; width: 100%; }
+.cs-elb { flex: none; width: 26px; color: rgba(255, 255, 255, .5); }
+.cs-ein {
+  flex: 1 1 auto; min-width: 0;
+  height: 22px;
+  margin: 3px 0;
+  padding: 0 5px;
+  border: 1px solid rgba(255, 255, 255, .22);
+  border-radius: 5px;
+  background: rgba(0, 0, 0, .35);
+  color: #fff;
+  font-family: inherit; font-size: 11px;
+  -webkit-appearance: none;
+}
+.cs-ein.num { flex: 0 0 52px; margin-left: 4px; }
+.cs-ein.wide { width: 100%; flex: none; }
 .cs-cloudstatus {
   padding: 5px 7px;
   border-radius: 5px;

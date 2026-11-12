@@ -17,7 +17,8 @@
     tools: !!q('.sf-tools'), studio: !!q('#clipsStudio')
   };
   out.api = C ? ['forVideo', 'mineOnlyState', 'setMineOnly', 'localList', 'addLocal',
-                 'delLocal', 'encodeShare', 'decodeShare', 'packComment', 'parseComment',
+                 'delLocal', 'updateLocal', 'pubSet', 'markPublished',
+                 'encodeShare', 'decodeShare', 'packComment', 'parseComment',
                  'parseGroups', 'loadCloud', 'openStudio']
                  .filter(function (k) { return typeof C[k] !== 'function'; }) : ['(module missing)'];
 
@@ -77,13 +78,33 @@
         noImportButton: !q('#csImport'),
         noImportTextarea: !q('#clipImportInput'),
         noNickInput: !q('#clipNick'), noClearButton: !q('#csClear'),
-        hasPublish: !!q('#csPublish')
+        noOldPublish: !q('#csPublish'),
+        hasPublishInc: !!q('#csPublishInc'), hasPublishAll: !!q('#csPublishAll')
       };
+      // 分享图标：cs-mini.icon 里必须是 SVG（常见分享图标），不再是 ↗ 文本
+      out.steps.shareIcon = (function () {
+        var b = q('#csList .cs-mini.icon');
+        return !!(b && b.querySelector('svg'));
+      })();
+      // 行内编辑：点击文字 → 该行进入编辑态（含起点/时长/备注输入）→ 取消恢复
+      out.steps.inlineEdit = (function () {
+        if (!s) return 'no-studio';
+        var items = s.querySelectorAll('#csList .cs-item');
+        if (!items.length) return 'no-clip';
+        var t = items[0].querySelector('.editable');
+        if (!t) return false;
+        t.click();
+        var ed = q('#csList .cs-item.editing');
+        var okEd = !!(ed && ed.querySelector('.cs-ein.num') && ed.querySelector('.cs-mini.wide.on'));
+        var cancel = ed ? ed.querySelector('.cs-mini.wide:not(.on)') : null;
+        if (cancel) cancel.click();
+        return okEd && !q('#csList .cs-item.editing');
+      })();
       if (s) s.hidden = true;
       return wait(50);
     })
     .then(function () {
-      // 「自定义」筛选：只看自己创建的片段，索引不变，再点恢复全部
+      // 「自定义」筛选：只看自己创建的片段，索引不变；nextIdx 只在 mine 段里推进
       var totalBefore = document.querySelectorAll('#sfBody .sf-row').length;
       C.setMineOnly(true);
       return wait(150).then(function () {
@@ -97,6 +118,13 @@
           totalBefore: totalBefore, shown: rows.length, allMine: allMine,
           count: (q('#sfCount') || {}).textContent || ''
         };
+        // nextIdx 筛选语义：开启筛选后「下一段」必须是 mine 段（或没有 → -1 停住）
+        var c = window.activeClip && window.activeClip();
+        out.steps.nextFilter = 'no-player';
+        if (c && c.segs && c.segs.length) {
+          var j = c.nextIdx();
+          out.steps.nextFilter = (j === -1) || (c.segs[j].src === 'mine');
+        }
         C.setMineOnly(false);
         return wait(150);
       }).then(function () {
@@ -160,7 +188,11 @@
         colorDiff: !!out.steps.color.mine && out.steps.color.mine !== out.steps.color.def,
         studio: sd.opened && sd.hasStart && sd.hasEnd && sd.hasChips && sd.hasNote &&
                 sd.hasSave && sd.noNumberedHeads && sd.noStateText && sd.noImportButton &&
-                sd.noImportTextarea && sd.noNickInput && sd.noClearButton && sd.hasPublish,
+                sd.noImportTextarea && sd.noNickInput && sd.noClearButton &&
+                sd.noOldPublish && sd.hasPublishInc && sd.hasPublishAll,
+        shareIcon: out.steps.shareIcon === true,
+        inlineEdit: out.steps.inlineEdit === true,
+        nextFilter: out.steps.nextFilter === true,
         filter: f.on && f.btnOn && f.allMine && f.shown > 0 && f.shown <= f.totalBefore,
         filterBack: fb.off && fb.rows === out.steps.filter.totalBefore,
         idle2s: out.steps.idleMs === 2000,

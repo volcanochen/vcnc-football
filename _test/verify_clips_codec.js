@@ -117,5 +117,31 @@ ok('混排返回伪 matched 项', merged.length >= 2, merged.length);
 ok('本地项带 src=mine 与显式 dur', merged.some(x => x.src === 'mine' && x.dur === 17), merged);
 ok('时间列用 m:ss 且不带 end', merged.every(x => /^\d+:\d{2}(:\d{2})?$/.test(x.time) && x.end === ''));
 
+// 6) 行内编辑 updateLocal：改时间/时长/备注，id 不变、按起点重排
+const l0 = C.localList(BV);
+const eid = l0[l0.length - 1].id;
+ok('updateLocal 改起点/时长/备注',
+   C.updateLocal(BV, eid, { s: 500, d: 9, n: '改过的进球' }) &&
+   (() => { const e = C.localList(BV).find(x => x.id === eid);
+            return e && e.s === 500 && e.d === 9 && e.n === '改过的进球'; })());
+ok('updateLocal 非法值被拒（时长 0）', C.updateLocal(BV, eid, { d: 0 }) === false);
+ok('updateLocal 不存在的 id 返回 false', C.updateLocal(BV, 'nope', { s: 1 }) === false);
+// 改回去，别影响后面用例
+C.updateLocal(BV, eid, { s: clips[1].s, d: clips[1].d, n: clips[1].n });
+
+// 7) 发布记录（增量发布依据）：markPublished / pubSet
+ok('初始 pubSet 为空', Object.keys(C.pubSet(BV)).length === 0);
+C.markPublished(BV, [{ s: 242 }, { s: 750 }]);
+ok('markPublished 记录起点', C.pubSet(BV)['242'] === 1 && C.pubSet(BV)['750'] === 1,
+   C.pubSet(BV));
+ok('pubSet 按秒取整匹配（浮点也能命中）', C.pubSet(BV)['242'] === 1);
+C.markPublished(BV, [{ s: 242 }]);               // 重复发布不重复记录
+ok('重复 markPublished 不重复记录',
+   Object.keys(C.pubSet(BV)).length === 2 && C.pubSet(BV)['242'] === 1);
+const otherSet = C.pubSet('BVAAAAAAAAAA');
+ok('发布记录按视频隔离', Object.keys(otherSet).length === 0);
+C.markPublished('BVAAAAAAAAAA', [{ s: 5 }]);
+ok('其它视频记录独立生效', C.pubSet('BVAAAAAAAAAA')['5'] === 1);
+
 console.log('\n结果：' + pass + ' PASS / ' + fail + ' FAIL');
 process.exit(fail ? 1 : 0);

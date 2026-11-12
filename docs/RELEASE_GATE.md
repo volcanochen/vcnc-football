@@ -40,14 +40,14 @@
 | 真机（可选） | 每台设备 `_test/verify_social.js` 全绿 | 左侧浮窗、App 授权桥与端点、二维码默认不显示且兜底可实绘、同进退隐藏、HUD 贴页签且三项同排一行、三连按钮在标题行且未登录为灰、大会员画质门禁、三连接口（已登录时不发真实三连） |
 | 真机（可选） | 每台设备 `_test/verify_top_row.js` 全绿 | 顶行排布专项：头像/昵称/箭头同一行、三连紧跟标题（同一行、间隙 ≤12px）、HUD 同行贴页签且只占一行、播放键更大、倒放键留空隙、收起箭头朝左 |
 | 真机（可选） | 每台设备 `_test/verify_tap.js` 全绿 | 手势语义：单击显示/隐藏浮窗、双击播停且不唤出浮窗、双击后单击仍生效 |
-| 真机（可选） | 每台设备 `_test/verify_clips.js` 全绿 | 自定义集锦：契约与 `＋制作 / 自定义` 工具行齐全（旧云端/导入按钮确已移除）、真机 WebView 中文 `btoa/atob` 分享码往返、临时片段混排且整行文字与官方行不同色、制作面板只留五个控件且无编号步骤/导入按钮、`自定义` 筛选后只剩 `src-mine` 行且能恢复、`CHROME_IDLE_MS=2000`、切列表页 / 注入登录弹层 class 时面板 `opacity=0 + pointer-events=none` 且回播放页恢复、临时片段可删且恢复 |
+| 真机（可选） | 每台设备 `_test/verify_clips.js` 全绿 | 自定义集锦：契约与 `＋制作 / 自定义` 工具行齐全（旧云端/导入按钮确已移除）、真机 WebView 中文 `btoa/atob` 分享码往返、临时片段混排且整行文字与官方行不同色、制作面板只留五个控件且无编号步骤/导入按钮、`增量/全量发布` 两按钮齐全且旧 `csPublish` 已移除、分享按钮是 SVG 图标、点行文字进入行内编辑且可取消、筛选开启时 `nextIdx()` 只指向 `mine` 段、`自定义` 筛选后只剩 `src-mine` 行且能恢复、`CHROME_IDLE_MS=2000`、切列表页 / 注入登录弹层 class 时面板 `opacity=0 + pointer-events=none` 且回播放页恢复、临时片段可删且恢复 |
 
 免设备的四条独立回归线（改社交 / 集锦模块时建议先跑）：
 
 ```bash
 python _test/verify_qr_matrix.py     # QR 矩阵与标准库逐点比对（需 node + Python qrcode 库，仅测试用）
 python _test/verify_social_api.py    # 桌面端点冒烟（含集锦空内容/未登录/非法 rpid/跨站 403），不发真实评论
-node _test/verify_clips_codec.js     # 分享码 + 评论文本编解码 27 项，纯 Node 免真机
+node _test/verify_clips_codec.js     # 分享码 + 评论文本编解码 36 项（含行内编辑/发布记录），纯 Node 免真机
 node _test/verify_share_page.js      # 微信 H5 中转页解码 11 项（正常码/查询串/篡改/缺码/中文）
 ```
 

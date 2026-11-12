@@ -15,10 +15,13 @@
   var KEY = 'vcnc.clips.v1';        // { bvid: { nick, list:[clip] } }
   var NICK_KEY = 'vcnc.clips.nick.v1';
   var LOADED_KEY = 'vcnc.clips.loaded.v1';  // { bvid: [groupKey, ...] }
+  var PUB_KEY = 'vcnc.clips.pub.v1';        // { bvid: { s:[起点秒,...] } } 已发布过的片段记录
   var PRESETS = ['进球', '射门', '过人', '扑救', '配合', '抢断', '争议', '精彩'];
   var MARK = '【VCNC集锦v1';
   var SHARE_HOST = 'https://volcanochen.github.io/vcnc-football/share/';
   var MAX_COMMENT = 900, MAX_PARTS = 3;
+  // 常见分享图标（Material share：三圆点两连线），替代箭头 ↗
+  var SHARE_SVG = '<svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M18 16.1c-.76 0-1.44.3-1.96.77L9 12.7c.05-.23.08-.46.08-.7s-.03-.47-.08-.7l7-4.13c.54.5 1.25.83 2 .83 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.03.47.08.7l-7 4.13A2.99 2.99 0 0 0 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.8 0 1.53-.31 2.08-.82l7.12 4.16c-.05.21-.08.43-.08.66 0 1.66 1.34 3 3 3s3-1.34 3-3-1.34-3-3-3z"/></svg>';
 
   function $(s, r) { return (r || document).querySelector(s); }
   function el(tag, cls, text) {
@@ -190,6 +193,41 @@
     for (var i = 0; i < list.length; i++) if (list[i].id !== id) out.push(list[i]);
     saveLocal(bvid, out);
   }
+  /* 行内编辑：改起点/时长/备注，id 保持不变；非法值返回 false 由调用方提示 */
+  function updateLocal(bvid, id, patch) {
+    if (!bvid || !id) return false;
+    var list = localList(bvid), hit = null, i;
+    for (i = 0; i < list.length; i++) if (list[i].id === id) { hit = list[i]; break; }
+    if (!hit) return false;
+    var next = { s: hit.s, d: hit.d, n: hit.n };
+    if (patch && patch.s != null) next.s = Number(patch.s);
+    if (patch && patch.d != null) next.d = Number(patch.d);
+    if (patch && patch.n != null) next.n = String(patch.n).replace(/\s+/g, ' ').slice(0, 24);
+    var c = cleanClip({ s: next.s, d: next.d, u: hit.u, n: next.n });
+    if (!c) return false;
+    hit.s = c.s; hit.d = c.d; hit.n = c.n; hit.u = hit.u || c.u;
+    list.sort(function (x, y) { return x.s - y.s; });
+    saveLocal(bvid, list);
+    return true;
+  }
+  /* 已发布片段记录：增量发布时用来判断「哪些还没发过」。按起点秒（取整）为键。 */
+  function pubSet(bvid) {
+    var a = jget(PUB_KEY, {});
+    var arr = (a[bvid] && a[bvid].s) || [], set = {};
+    for (var i = 0; i < arr.length; i++) set[String(Math.round(arr[i]))] = 1;
+    return set;
+  }
+  function markPublished(bvid, clips) {
+    if (!bvid || !clips || !clips.length) return;
+    var a = jget(PUB_KEY, {});
+    var rec = a[bvid] || { s: [] }, set = pubSet(bvid);
+    for (var i = 0; i < clips.length; i++) {
+      var k = String(Math.round(clips[i].s));
+      if (!set[k]) { set[k] = 1; rec.s.push(clips[i].s); }
+    }
+    a[bvid] = rec;
+    jset(PUB_KEY, a);
+  }
   function getNick() {
     var n = lsGet(NICK_KEY);
     if (n) return n;
@@ -246,9 +284,9 @@
 
   // 云端状态：登录后自动读取；group = { key, mid, user, bvid, rpids, clips }
   // nextAt：B 站评论接口被风控（-412）时退避，避免 2s 轮询把 IP 打进更长的黑名单
-  var cloud = { bvid: '', groups: [], mine: null, others: [], busy: false,
+  var cloud = { bvid: '', groups: [], mine: null, mineAll: [], others: [], busy: false,
                 lastKey: '', nextAt: 0, status: '' };
-  var lastLogin = null, draft = { start: null, end: null }, studio = null;
+  var lastLogin = null, draft = { start: null, end: null }, studio = null, editingId = null;
 
   // 「自定义」筛选：只看自己创建的片段。只过滤浮窗列表的显示，
   // 播放序列 segs 与 data-i 索引保持原样，点行跳段不会错位。
@@ -267,7 +305,13 @@
     syncMineBtn();
     try { if (global.renderSegFloat) global.renderSegFloat(true); } catch (e) {}
     renderStudio();
-    tip(mineOnly ? '只看我创建的片段' : '显示全部集锦');
+    // 筛选改变「下一段」的走向：备用 deck 已按旧序列预热，立刻按新规则重备
+    try {
+      var c = global.activeClip && global.activeClip();
+      if (c && c.state === 'ready' && c.idx >= 0) c.prepareNext();
+    } catch (e) {}
+    tip(mineOnly ? '只看我创建的片段（连播/切下一条也只在自定义片段里走）'
+                 : '显示全部集锦');
   }
 
   // ---------------------------------------------------------------- 合并进播放序列
@@ -285,8 +329,9 @@
     }
     var mine = localList(bvid);
     for (i = 0; i < mine.length; i++) push(mine[i], 'mine');
-    if (cloud.bvid === bvid && cloud.mine) {
-      var cc = cloud.mine.clips;
+    // 自己发的可能有增量/全量多条评论：全部合并显示（同起点只显示一条）
+    if (cloud.bvid === bvid && cloud.mineAll && cloud.mineAll.length) {
+      var cc = cloud.mineAll;
       for (i = 0; i < cc.length; i++) push(cc[i], 'cloud');
     }
     if (cloud.bvid === bvid) {
@@ -363,11 +408,24 @@
       var gs = parseGroups(j.replies, bvid);
       var had = !!(cloud.mine && cloud.mine.clips.length);
       cloud.bvid = bvid; cloud.groups = gs; cloud.mine = null; cloud.others = [];
+      cloud.mineAll = [];
       for (var i = 0; i < gs.length; i++) {
         var own = me.loggedIn && me.mid && String(me.mid) === gs[i].mid;
-        if (own && !cloud.mine) cloud.mine = gs[i];
-        else cloud.others.push(gs[i]);
+        if (own) {
+          if (!cloud.mine) cloud.mine = gs[i];
+          cloud.mineAll = cloud.mineAll.concat(gs[i].clips);
+        } else {
+          cloud.others.push(gs[i]);
+        }
       }
+      // 发布不再替换旧评论：同一个人可能有多条集锦评论，按起点合并去重后都算「发过」
+      var seenS = {};
+      cloud.mineAll = cloud.mineAll.filter(function (c) {
+        var k = String(Math.round(c.s));
+        if (seenS[k]) return false;
+        seenS[k] = 1;
+        return true;
+      });
       cloud.lastKey = ck;
       cloud.nextAt = 0;
       cloud.status = '评论区共 ' + (j.count || 0) + ' 条，找到 ' + gs.length + ' 份集锦';
@@ -382,8 +440,12 @@
     });
   }
 
-  // ---------------------------------------------------------------- 云端发布 / 删除
-  function publish() {
+  // ------------------------------------------------------- 云端发布（增量 / 全量）
+  /* 两种模式都**不删旧评论**（用户明确要求）：
+     - 增量 inc：之前发过的片段（本地发布记录 + 评论区自己所有分片）剔除掉，
+       只把没发过的新片段作为一条新评论发出去；
+     - 全量 all：整份列表直接发成一条新评论（超长自动分片）。 */
+  function publish(mode) {
     var st = state(), bvid = st.bvid, aid = st.aid, me = getMe();
     if (!me.loggedIn) {
       tip('发布到评论区需要先登录 B 站账号');
@@ -392,48 +454,40 @@
     }
     var list = localList(bvid);
     if (!list.length) { tip('本场还没有自定义片段'); return; }
-    var msgs = packComment(bvid, getNick(), list);
-    if (!msgs.length) { tip('没有可发布的片段'); return; }
-    if (lastDropped) tip('片段太多，评论区最多放 ' + (list.length - lastDropped) + ' 段，其余仍留在本机');
-    cloud.busy = true; cloud.status = '正在整理旧评论…'; renderStudio();
-    // 先删自己发的旧分片，保证「更新＝替换」，评论区不堆垃圾
-    fetchReplies(aid).then(function (j) {
-      var old = [], mineMid = String(me.mid || '');
-      var reps = (j && j.replies) || [];
-      for (var i = 0; i < reps.length; i++) {
-        if (String(reps[i].mid || '') !== mineMid) continue;
-        if (String(reps[i].text || '').indexOf(MARK) !== 0) continue;
-        var p = parseComment(reps[i].text, bvid);
-        if (p) old.push(reps[i].rpid);
+    var toSend = list;
+    if (mode === 'inc') {
+      var sent = pubSet(bvid);
+      if (cloud.bvid === bvid && cloud.mineAll && cloud.mineAll.length) {
+        for (var i = 0; i < cloud.mineAll.length; i++)
+          sent[String(Math.round(cloud.mineAll[i].s))] = 1;
       }
-      var chain = Promise.resolve();
-      old.forEach(function (rpid) {
-        chain = chain.then(function () {
-          return api('/api/clips/delete', { method: 'POST',
-            body: form({ oid: aid, bvid: bvid, rpid: rpid }) });
-        });
+      toSend = list.filter(function (c) { return !sent[String(Math.round(c.s))]; });
+      if (!toSend.length) { tip('没有新增片段——本场列表里的都发布过了'); return; }
+    }
+    var msgs = packComment(bvid, getNick(), toSend);
+    if (!msgs.length) { tip('没有可发布的片段'); return; }
+    if (lastDropped) tip('片段太多，评论区最多放 ' + (toSend.length - lastDropped) + ' 段，其余仍留在本机');
+    cloud.busy = true; cloud.status = '正在发布…'; renderStudio();
+    // 不再删除旧评论：增量 / 全量都是追加一条新评论
+    var chain2 = Promise.resolve(null), n = 0;
+    msgs.forEach(function (msg, idx) {
+      chain2 = chain2.then(function () {
+        return new Promise(function (res) { setTimeout(res, idx ? 1300 : 0); });
+      }).then(function () {
+        return api('/api/clips/publish', { method: 'POST',
+          body: form({ oid: aid, bvid: bvid, message: msg }) });
+      }).then(function (r) {
+        if (!r || !r.ok) throw new Error((r && r.error) || '发布失败');
+        n++;
+        cloud.status = '已发布 ' + n + '/' + msgs.length; renderStudio();
       });
-      return chain.then(function () { return old.length; });
-    }).then(function (deleted) {
-      cloud.status = '已清理旧评论 ' + deleted + ' 条，开始发布…'; renderStudio();
-      var chain2 = Promise.resolve(null), n = 0;
-      msgs.forEach(function (msg, idx) {
-        chain2 = chain2.then(function () {
-          return new Promise(function (res) { setTimeout(res, idx ? 1300 : 0); });
-        }).then(function () {
-          return api('/api/clips/publish', { method: 'POST',
-            body: form({ oid: aid, bvid: bvid, message: msg }) });
-        }).then(function (r) {
-          if (!r || !r.ok) throw new Error((r && r.error) || '发布失败');
-          n++;
-          cloud.status = '已发布 ' + n + '/' + msgs.length; renderStudio();
-        });
-      });
-      return chain2.then(function () { return n; });
-    }).then(function (n) {
+    });
+    chain2.then(function () {
+      markPublished(bvid, toSend);
       cloud.busy = false; cloud.lastKey = '';
-      cloud.status = '发布完成：' + n + ' 条评论';
-      tip('已把 ' + list.length + ' 个片段发布到评论区');
+      cloud.status = '发布完成：新增 ' + n + ' 条评论（旧评论未动）';
+      tip(mode === 'inc' ? ('增量发布 ' + toSend.length + ' 个新片段')
+                         : ('已把 ' + toSend.length + ' 个片段发成一条新评论'));
       renderStudio();
       loadCloud(bvid, aid, true);
     }).catch(function (e) {
@@ -558,10 +612,11 @@
       '    <div class="cs-list" id="csList"></div></div>' +
       '  <div class="cs-sec"><div class="cs-h">云端 / 他人集锦</div>' +
       '    <div class="cs-cloudstatus" id="csCloudStatus">未登录时只能保存在本机</div>' +
-      '    <div class="cs-row"><button type="button" class="cs-btn" id="csPublish">发布到评论区</button>' +
-      '      <button type="button" class="cs-btn" id="csReload">重新读取</button></div>' +
+      '    <div class="cs-row"><button type="button" class="cs-btn" id="csPublishInc" title="只把没发布过的新片段发成一条新评论">增量发布</button>' +
+      '      <button type="button" class="cs-btn" id="csPublishAll" title="整份列表直接发成一条新评论">全量发布</button>' +
+      '      <button type="button" class="cs-btn ghost" id="csReload" title="重新读取评论区">刷新</button></div>' +
       '    <div class="cs-list" id="csOthers"></div>' +
-      '    <div class="cs-note">发布＝替换你之前发的那份集锦评论；B 站删掉评论后，云端这份会消失，本机列表仍保留。</div>' +
+      '    <div class="cs-note">两种发布都不删旧评论：增量只发没发过的新片段；全量把整份列表再发一条。在 B 站删掉评论后，云端那份会消失，本机列表仍保留。</div>' +
       '  </div>' +
       // 「导入集锦」按钮已按反馈删除：导入统一走剪贴板一键导入 / 分享深链自动导入
       '  <div class="cs-sec"><div class="cs-h">分享 / 导入</div>' +
@@ -587,7 +642,8 @@
     $('#csStart', box).addEventListener('click', setStart);
     $('#csEnd', box).addEventListener('click', setEnd);
     $('#csSave', box).addEventListener('click', saveClip);
-    $('#csPublish', box).addEventListener('click', publish);
+    $('#csPublishInc', box).addEventListener('click', function () { publish('inc'); });
+    $('#csPublishAll', box).addEventListener('click', function () { publish('all'); });
     $('#csReload', box).addEventListener('click', function () {
       var st = state(); cloud.lastKey = ''; cloud.nextAt = 0;
       loadCloud(st.bvid, st.aid, false);
@@ -629,14 +685,58 @@
     list.forEach(function (c) {
       var row = el('div', 'cs-item');
       row.appendChild(el('span', 'cs-dot mine', ''));
+      if (editingId === c.id) {
+        // 行内编辑态：起点（mm:ss 或秒）/ 时长（秒）/ 备注，保存后重排并重建播放序列
+        row.classList.add('editing');
+        var er1 = el('div', 'cs-erow');
+        var inS = el('input', 'cs-ein'); inS.type = 'text'; inS.value = s2t(c.s);
+        var inD = el('input', 'cs-ein num'); inD.type = 'text'; inD.value = String(c.d);
+        var lbS = el('label', 'cs-elb', '起点'), lbD = el('label', 'cs-elb', '时长');
+        er1.appendChild(lbS); er1.appendChild(inS); er1.appendChild(lbD); er1.appendChild(inD);
+        var inN = el('input', 'cs-ein wide'); inN.type = 'text'; inN.value = c.n;
+        inN.maxLength = 24; inN.placeholder = '备注';
+        var er2 = el('div', 'cs-erow');
+        var ok = el('button', 'cs-mini wide on', '保存'); ok.type = 'button';
+        var no = el('button', 'cs-mini wide', '取消'); no.type = 'button';
+        ok.addEventListener('click', function () {
+          var sv = t2s(inS.value);
+          var dv = parseFloat(inD.value);
+          if (sv == null || !isFinite(sv) || sv < 0) { tip('起点格式：mm:ss 或秒数'); return; }
+          if (!isFinite(dv) || dv <= 0 || dv > 3600) { tip('时长要大于 0 秒'); return; }
+          if (updateLocal(bvid, c.id, { s: sv, d: dv, n: inN.value })) {
+            editingId = null;
+            tip('片段已更新');
+            rebuild();          // rebuildClips + renderStudio
+          } else tip('修改无效，请检查时间/时长');
+        });
+        no.addEventListener('click', function () { editingId = null; renderStudio(); });
+        er2.appendChild(ok); er2.appendChild(no);
+        row.appendChild(er1); row.appendChild(inN); row.appendChild(er2);
+        box.appendChild(row);
+        return;
+      }
       var t = el('span', 'cs-t', s2t(c.s) + ' +' + c.d + 's');
+      var nn = el('span', 'cs-n', c.n);
+      var uu = el('span', 'cs-u', '@' + c.u);
+      // 点击文字（时间/备注/昵称）进入行内编辑：可改时间、时长、介绍
+      function editGo() { editingId = c.id; renderStudio(); }
+      t.className += ' editable'; t.title = '点击编辑起点/时长/备注';
+      nn.className += ' editable'; nn.title = '点击编辑起点/时长/备注';
+      uu.className += ' editable'; uu.title = '点击编辑起点/时长/备注';
+      t.addEventListener('click', editGo);
+      nn.addEventListener('click', editGo);
+      uu.addEventListener('click', editGo);
       row.appendChild(t);
-      row.appendChild(el('span', 'cs-n', c.n));
-      row.appendChild(el('span', 'cs-u', '@' + c.u));
+      row.appendChild(nn);
+      row.appendChild(uu);
       var del = el('button', 'cs-mini', '✕'); del.type = 'button'; del.title = '删除';
-      del.addEventListener('click', function () { delLocal(bvid, c.id); rebuild(); });
+      del.addEventListener('click', function () {
+        if (editingId === c.id) editingId = null;
+        delLocal(bvid, c.id); rebuild();
+      });
       row.appendChild(del);
-      var sh = el('button', 'cs-mini', '↗'); sh.type = 'button'; sh.title = '分享这个片段';
+      var sh = el('button', 'cs-mini icon'); sh.type = 'button';
+      sh.title = '分享这个片段'; sh.innerHTML = SHARE_SVG;
       sh.addEventListener('click', function () { shareClips(bvid, [c]); });
       row.appendChild(sh);
       box.appendChild(row);
@@ -719,6 +819,9 @@
     localList: localList,
     addLocal: addLocal,
     delLocal: delLocal,
+    updateLocal: updateLocal,
+    pubSet: pubSet,
+    markPublished: markPublished,
     getNick: getNick,
     setNick: setNick,
     encodeShare: encodeShare,

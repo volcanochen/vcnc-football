@@ -1071,7 +1071,13 @@ ClipPlayer.prototype.startDeck = async function (d) {
 
 ClipPlayer.prototype.nextIdx = function () {
   if (!this.segs.length) return -1;
-  if (this.idx + 1 < this.segs.length) return this.idx + 1;
+  /* 「自定义」筛选开启时，切下一条 / 连播推进只走自定义片段：从当前段的下一条起，
+     找最近的 mine 段；官方段全部跳过，找不到就播完停住 */
+  var mineOnly = !!(window.VCNCClips && window.VCNCClips.mineOnlyState &&
+                    window.VCNCClips.mineOnlyState());
+  for (var i = this.idx + 1; i < this.segs.length; i++) {
+    if (!mineOnly || this.segs[i].src === 'mine') return i;
+  }
   return -1;
 };
 

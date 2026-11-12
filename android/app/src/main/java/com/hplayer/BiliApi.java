@@ -195,6 +195,7 @@ return createSocket(host.getHostAddress(), port);
                     JSONObject entry = new JSONObject();
                     entry.put("rpid", r.optLong("rpid"));
                     entry.put("user", uname);
+                    entry.put("mid", member == null ? "" : member.optString("mid", ""));
                     entry.put("time", r.optLong("ctime"));
                     entry.put("text", msg);
                     out.put(entry);

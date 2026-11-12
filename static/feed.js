@@ -779,13 +779,22 @@ function scheduleCalib(clip) {
 
 /** 置顶评论时间戳 → 片段序列（规则同 H-Player：显式时长优先，否则相邻间隔推断） */
 ClipPlayer.prototype.buildSegs = function (matched) {
+  // 自定义集锦（clips.js）与 VCNC 置顶评论共用同一条「原始录像时钟」轴，
+  // 这里把两者混成一个序列：排序、冲突截断、连播调度全部走原有逻辑。
+  var extra = [];
+  try {
+    if (window.VCNCClips && window.VCNCClips.forVideo)
+      extra = window.VCNCClips.forVideo(this.item && this.item.bvid) || [];
+  } catch (e) { extra = []; }
+  matched = (matched || []).concat(extra);
   var its = [];
   for (var i = 0; i < matched.length; i++) {
     var mm = matched[i];
     var s0 = toSec(mm.time || '');
     if (s0 == null) continue;
     var s1 = (mm.end && String(mm.end).indexOf('+') < 0) ? toSec(mm.end) : null;
-    its.push({ m: mm, s0: s0, s1: s1 });
+    its.push({ m: mm, s0: s0, s1: s1,
+               src: mm.src || 'vcnc', user: mm.user || '', cid: mm.cid || '' });
   }
   its.sort(function (a, b) { return a.s0 - b.s0; });
   var segs = [];
@@ -797,14 +806,17 @@ ClipPlayer.prototype.buildSegs = function (matched) {
     else if (it.s1 != null && it.s1 > it.s0) d = clamp(it.s1 - it.s0, 3, 60);
     else if (k + 1 < its.length && its[k + 1].s0 > it.s0) d = clamp(its[k + 1].s0 - it.s0, 3, 30);
     else d = 10;
-    // 评论时间戳按原始录像（烧录钟）记：先过对齐映射再落流时间轴
-    var start = Math.max(0, toStream(it.s0) - padF);
-    var dur = d * invB + padF + padB;
+    // 评论时间戳按原始录像（烧录钟）记：先过对齐映射再落流时间轴。
+    // 自定义片段是用户自己框的精确起止，不再吃自动补时（否则「选了 17s 播 20s」）。
+    var custom = it.src !== 'vcnc';
+    var start = Math.max(0, toStream(it.s0) - (custom ? 0 : padF));
+    var dur = custom ? d * invB : (d * invB + padF + padB);
     if (this.videoDuration > 0) {
       if (start >= this.videoDuration - 0.2) continue;
       if (start + dur > this.videoDuration) dur = Math.max(0.6, this.videoDuration - start);
     }
-    segs.push({ start: start, dur: dur, note: it.m.text || '', orig: it.s0 });
+    segs.push({ start: start, dur: dur, note: it.m.text || '', orig: it.s0,
+                src: it.src, user: it.user, cid: it.cid });
   }
   this.segTotal = segs.length;               // 筛选前的片段总数（设置页显示命中数）
   // 集锦分类：按备注字符字面筛选（原片模式不筛）；筛完为空则回退全部并提示
@@ -3052,8 +3064,14 @@ function renderSegFloat(force) {
   } else {
     for (var i = 0; i < segs.length; i++) {
       var row = document.createElement('div');
-      row.className = 'sf-row';
+      row.className = 'sf-row' + (segs[i].src && segs[i].src !== 'vcnc'
+        ? ' src-' + segs[i].src : '');
       row.setAttribute('data-i', String(i));
+      if (segs[i].src && segs[i].src !== 'vcnc') {
+        var tag = segs[i].src === 'mine' ? '我·本机' : (segs[i].src === 'cloud' ? '我·云端' : '他人');
+        row.title = tag + (segs[i].user ? ' @' + segs[i].user : '') +
+                    '｜' + (segs[i].note || '片段');
+      }
       var no = document.createElement('span');
       no.className = 'sf-no';
       no.textContent = (i + 1) < 10 ? '0' + (i + 1) : '' + (i + 1);
@@ -4630,7 +4648,8 @@ function keepChrome() {
   /* 登录弹层/账号浮窗也计入「正在操作」：用户点授权、粘 Cookie 时不该被淡出 */
   function inChrome(t) {
     return !!(t && t.closest && (t.closest('.chrome') || t.closest('#segFloat') ||
-                                 t.closest('#socFloat') || t.closest('#socModal')));
+                                 t.closest('#socFloat') || t.closest('#socModal') ||
+                                 t.closest('#clipsStudio')));
   }
   document.addEventListener('pointerdown', function (e) {
     if (!inChrome(e.target)) return;
@@ -5535,6 +5554,7 @@ function socialGetState() {
   }
   return {
     bvid: (c && c.item && c.item.bvid) ? c.item.bvid : '',
+    aid: String((c && c.info && c.info.aid) || ''),   // 评论区 oid，自定义集锦云同步用
     title: (c && c.info && c.info.title) || (c && c.item && c.item.title) || '',
     qn: QN,
     quality: (c && c.info && c.info.quality) || 0,
@@ -5559,6 +5579,23 @@ function reloadKeepPos() {
 
 window.VCNC = {
   getState: socialGetState,
+  /* ---- 自定义集锦（clips.js）专用：读当前帧的两种时间轴 / 暂停 / 重建序列 ---- */
+  getTime: function () {
+    var c = activeClip();
+    if (!c || !c.decks || !c.decks[c.activeDeck] || !c.decks[c.activeDeck].v) return null;
+    var t = c.decks[c.activeDeck].v.currentTime;
+    return { stream: t, orig: toOrig(t), playing: !!c.playing };
+  },
+  pause: function () {
+    var c = activeClip();
+    if (c && c.state === 'ready' && c.playing) c.togglePlay(true);
+  },
+  rebuildClips: function () { rebuildActiveSegs('自定义集锦已更新'); },
+  goVideo: function (bvid) {
+    if (!bvid) return false;
+    try { location.href = 'feed.html?bv=' + encodeURIComponent(bvid); } catch (e) { return false; }
+    return true;
+  },
   setQuality: function (qn) {
     qn = parseInt(qn, 10);
     if (!isFinite(qn) || qn < 6 || qn > 127) return false;

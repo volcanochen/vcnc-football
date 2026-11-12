@@ -99,6 +99,15 @@
                 <data android:scheme="bilibili" android:host="video" />
                 <data android:scheme="bilibili" />
             </intent-filter>
+
+            <!-- 自定义集锦分享：中转页/系统浏览器点「打开 App」时带 VC1.… 导入码回来。
+                 微信内置浏览器会拦自定义 scheme，故同时保留「复制导入码」的纯文本兜底。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="vcncfootball" android:host="import" />
+            </intent-filter>
         </activity>
 
         <!-- 极简 ContentProvider：替代 AndroidX 的 FileProvider，用来向系统安装器

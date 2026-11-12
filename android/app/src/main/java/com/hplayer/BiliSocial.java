@@ -532,4 +532,70 @@ public final class BiliSocial {
             return err("三连请求失败：" + (e.getMessage() == null ? e.toString() : e.getMessage()));
         }
     }
+
+    // ---------------------------------------------------------------- 自定义集锦：评论区读写
+    /** 统一的评论写请求：type=1 视频评论区，plat=1 web 端，csrf=bili_jct。
+     *  /add 发评论、/del 删自己发的评论（更新集锦时先删旧片再发新片）。 */
+    private static JSONObject replyWrite(String api, String oid, String bvid,
+                                         String extraKey, String extraVal) {
+        try {
+            if (userCookie().isEmpty()) {
+                JSONObject o = err("请先登录 B 站账号");
+                o.put("needLogin", true);
+                return o;
+            }
+            String csrf = csrf();
+            if (csrf.isEmpty()) {
+                JSONObject o = err("登录凭证缺少 bili_jct，请重新授权登录");
+                o.put("needLogin", true);
+                return o;
+            }
+            if (!oid.matches("\\d{1,20}")) return err("视频 aid 无效");
+            String post = "type=1&oid=" + URLEncoder.encode(oid, "UTF-8")
+                    + (extraKey == null ? "" : "&" + extraKey + "=" + URLEncoder.encode(extraVal, "UTF-8"))
+                    + "&plat=1&csrf=" + URLEncoder.encode(csrf, "UTF-8");
+            Map<String, String> h = BiliApi.apiHeaders(fullCookie());
+            h.put("Referer", "https://www.bilibili.com/video/" + (bvid == null ? "" : bvid));
+            h.put("Origin", "https://www.bilibili.com");
+            Resp r = request(API + api, post, h, 15000);
+            JSONObject j = json(r.body);
+            int code = j.optInt("code", -1);
+            if (code != 0) {
+                String msg = j.optString("message", "HTTP " + r.status);
+                if (code == -101) msg = "登录已过期，请重新授权登录";
+                else if (code == -111) msg = "CSRF 校验失败，请重新授权登录";
+                else if (code == -509) msg = "评论太频繁，稍等 30 秒再试";
+                else if (code == 12015) msg = "B 站要求验证码，请先去视频页手动发一条评论";
+                else if (code == 12051) msg = "重复评论，请稍后再试";
+                else if (code == 12025) msg = "评论过长，请减少片段或缩短备注";
+                else if (code == 12035) msg = "被 UP 主列入评论黑名单，无法发布";
+                else if (code == 12002 || code == 12052) msg = "该视频评论区已关闭";
+                else if (code == 12053) msg = "已达到今日评论上限";
+                JSONObject o = err(msg);
+                o.put("code", code);
+                o.put("needLogin", code == -101 || code == -111);
+                return o;
+            }
+            JSONObject d = j.optJSONObject("data");
+            JSONObject o = new JSONObject();
+            o.put("ok", true);
+            o.put("rpid", d == null ? 0 : d.optLong("rpid", 0));
+            return o;
+        } catch (Exception e) {
+            return err("评论请求失败：" + (e.getMessage() == null ? e.toString() : e.getMessage()));
+        }
+    }
+
+    /** 发布一条集锦评论（message 已由前端按【VCNC集锦v1】格式拼好并分片） */
+    public static JSONObject clipsPublish(String oid, String bvid, String message) {
+        if (message == null || message.trim().isEmpty()) return err("集锦内容为空");
+        if (message.length() > 1000) return err("单条评论超过 1000 字，请减少片段");
+        return replyWrite("/x/v2/reply/add", oid, bvid, "message", message);
+    }
+
+    /** 删除自己发的旧集锦评论（rpid 由前端从评论区读取，且必须是带本标记的评论） */
+    public static JSONObject clipsDelete(String oid, String bvid, long rpid) {
+        if (rpid <= 0) return err("评论 id 无效");
+        return replyWrite("/x/v2/reply/del", oid, bvid, "rpid", String.valueOf(rpid));
+    }
 }

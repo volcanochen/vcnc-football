@@ -811,6 +811,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(social.poll((qs.get("key") or [""])[0]))
             elif path == "/api/social/me":
                 self.send_json(social.me(force=(qs.get("force") or [""])[0] == "1"))
+            elif path == "/api/replies":
+                self.handle_replies(qs)
             elif path == "/api/ping":
                 self.send_json({"ok": True, "t": time.time()})
             else:
@@ -838,6 +840,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/social/triple":
                 self.send_json(social.triple((qs.get("bvid") or [""])[0]))
+            elif path == "/api/clips/publish":
+                self.send_json(social.clips_publish(
+                    (qs.get("oid") or [""])[0], (qs.get("bvid") or [""])[0],
+                    (qs.get("message") or [""])[0]))
+            elif path == "/api/clips/delete":
+                self.send_json(social.clips_delete(
+                    (qs.get("oid") or [""])[0], (qs.get("bvid") or [""])[0],
+                    (qs.get("rpid") or [""])[0]))
             elif path == "/api/social/manual":
                 self.send_json(social.set_manual_cookie((qs.get("cookie") or [""])[0]))
             elif path == "/api/social/logout":
@@ -860,6 +870,46 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     # ---------------- 接口 ----------------
+    def handle_replies(self, qs):
+        """原始评论列表（自定义集锦的云端载体）。与 Android BiliApi.fetchReplies 同语义。"""
+        aid = (qs.get("aid") or [""])[0]
+        try:
+            pages = max(1, min(15, int((qs.get("pages") or ["5"])[0])))
+        except (TypeError, ValueError):
+            pages = 5
+        ps = min(20, max(1, int((qs.get("ps") or ["20"])[0] or 20)))
+        if not aid.isdigit():
+            self.send_json({"ok": False, "error": "缺少 aid"})
+            return
+        cookie = (qs.get("cookie") or [""])[0] or social.user_cookie()
+        rows = []
+        for pn in range(1, pages + 1):
+            url = ("https://api.bilibili.com/x/v2/reply?type=1&oid=" + aid
+                   + "&pn=" + str(pn) + "&ps=" + str(ps)
+                   + "&sort=2&web_location=1315875")
+            try:
+                j = http_json(url, cookie=cookie, timeout=15)
+            except Exception as exc:  # noqa: BLE001
+                break
+            if j.get("code") != 0:
+                break
+            replies = ((j.get("data") or {}).get("replies")) or []
+            if not replies:
+                break
+            for r in replies:
+                c = r.get("content") or {}
+                m = r.get("member") or {}
+                rows.append({
+                    "rpid": r.get("rpid") or 0,
+                    "user": m.get("uname") or "",
+                    "mid": m.get("mid") or "",
+                    "time": r.get("ctime") or 0,
+                    "text": c.get("message") or "",
+                })
+            if len(replies) < ps:
+                break
+        self.send_json({"ok": True, "count": len(rows), "replies": rows})
+
     def handle_resolve(self, qs):
         raw = (qs.get("url") or [""])[0]
         page = int((qs.get("p") or ["1"])[0] or 1)

@@ -81,6 +81,26 @@ def main():
         t = req("/api/social/triple", {"bvid": "BV1p5xd6hEK2"})[1]
         expect("triple（未登录）", t.get("needLogin") is True, t.get("error", ""))
 
+        # 自定义集锦端点：只做不发真实评论的安全路径
+        cp = req("/api/clips/publish", {"oid": "123", "bvid": "BV1p5xd6hEK2",
+                                        "message": ""})[1]
+        expect("集锦发布·空内容", cp.get("ok") is False and "空" in cp.get("error", ""),
+               cp.get("error", ""))
+        cp2 = req("/api/clips/publish", {"oid": "123", "bvid": "BV1p5xd6hEK2",
+                                         "message": "【VCNC集锦v1】BV1p5xd6hEK2 @x"})[1]
+        expect("集锦发布·未登录", cp2.get("needLogin") is True, cp2.get("error", ""))
+        cd = req("/api/clips/delete", {"oid": "123", "bvid": "BV1p5xd6hEK2",
+                                       "rpid": "0"})[1]
+        expect("集锦删除·非法 rpid", cd.get("ok") is False, cd.get("error", ""))
+        cr = req("/api/replies?aid=nope")[1]
+        expect("评论读取·非法 aid", cr.get("ok") is False, cr.get("error", ""))
+        try:
+            req("/api/clips/publish", {"oid": "123", "bvid": "BV1p5xd6hEK2", "message": "x"},
+                {"Origin": "https://evil.example"})
+            expect("集锦发布·跨站拦截", False, "恶意 Origin 未被拒绝")
+        except urllib.error.HTTPError as e:
+            expect("集锦发布·跨站拦截", e.code == 403, "HTTP %d" % e.code)
+
         try:
             req("/api/social/triple", {"bvid": "BV1p5xd6hEK2"},
                 {"Origin": "https://evil.example"})

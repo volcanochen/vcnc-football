@@ -36,6 +36,8 @@ cp -f "$STATIC/feed.css"   "$WWW/feed.css"
 cp -f "$STATIC/qr.js"      "$WWW/qr.js"
 cp -f "$STATIC/social.js"  "$WWW/social.js"
 cp -f "$STATIC/social.css" "$WWW/social.css"
+cp -f "$STATIC/clips.js"   "$WWW/clips.js"
+cp -f "$STATIC/clips.css"  "$WWW/clips.css"
 # 品牌资源：设置页「分享与支持」要用到的图标与两张二维码
 cp -f "$STATIC/app-icon.png"  "$WWW/app-icon.png"
 cp -f "$STATIC/share-qr.png"  "$WWW/share-qr.png"

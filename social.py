@@ -452,3 +452,74 @@ def triple(bvid: str) -> dict:
         "multiply": int(data.get("multiply") or 0),
         "text": "已三连：点赞 + 投币 + 收藏",
     }
+
+
+# ---------------------------------------------------------------- 自定义集锦：评论区读写
+_REPLY_ERR = {
+    -101: "登录已过期，请重新授权登录",
+    -111: "CSRF 校验失败，请重新授权登录",
+    -509: "评论太频繁，稍等 30 秒再试",
+    12015: "B 站要求验证码，请先去视频页手动发一条评论",
+    12051: "重复评论，请稍后再试",
+    12025: "评论过长，请减少片段或缩短备注",
+    12035: "被 UP 主列入评论黑名单，无法发布",
+    12002: "该视频评论区已关闭",
+    12052: "该视频评论区已关闭",
+    12053: "已达到今日评论上限",
+}
+
+
+def reply_write(api: str, oid: str, bvid: str, extra: dict) -> dict:
+    """评论写操作公共部分：type=1 视频评论区 / plat=1 web / csrf=bili_jct。"""
+    cookie = user_cookie()
+    if not cookie:
+        return {"ok": False, "error": "请先登录 B 站账号", "needLogin": True}
+    csrf = ""
+    for part in cookie.split(";"):
+        p = part.strip()
+        if p.startswith("bili_jct="):
+            csrf = p.split("=", 1)[1]
+            break
+    if not csrf:
+        return {"ok": False, "error": "登录凭证缺少 bili_jct，请重新授权登录",
+                "needLogin": True}
+    if not re.fullmatch(r"\d{1,20}", oid or ""):
+        return {"ok": False, "error": "视频 aid 无效"}
+    form = {"type": "1", "oid": oid, "plat": "1", "csrf": csrf}
+    form.update(extra)
+    headers = {
+        "Cookie": _full_cookie(),
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": "https://www.bilibili.com/video/" + (bvid or ""),
+        "Origin": "https://www.bilibili.com",
+    }
+    body, _, st = _request(API + api, data=urllib.parse.urlencode(form).encode(),
+                           headers=headers, timeout=15)
+    j = _json_or_empty(body)
+    code = int(j.get("code", -1) or -1)
+    if code != 0:
+        return {"ok": False, "error": _REPLY_ERR.get(code) or (j.get("message") or "HTTP %s" % st),
+                "code": code, "needLogin": code in (-101, -111)}
+    data = j.get("data") or {}
+    return {"ok": True, "rpid": int(data.get("rpid") or 0)}
+
+
+def clips_publish(oid: str, bvid: str, message: str) -> dict:
+    """发一条集锦评论（message 由前端按【VCNC集锦v1】格式拼好并分片）。"""
+    message = message or ""
+    if not message.strip():
+        return {"ok": False, "error": "集锦内容为空"}
+    if len(message) > 1000:
+        return {"ok": False, "error": "单条评论超过 1000 字，请减少片段"}
+    return reply_write("/x/v2/reply/add", oid, bvid, {"message": message})
+
+
+def clips_delete(oid: str, bvid: str, rpid: str) -> dict:
+    """删自己发的旧集锦评论（rpid 来自评论区，前端限定只传带本标记的）。"""
+    try:
+        rid = int(rpid)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "评论 id 无效"}
+    if rid <= 0:
+        return {"ok": False, "error": "评论 id 无效"}
+    return reply_write("/x/v2/reply/del", oid, bvid, {"rpid": str(rid)})

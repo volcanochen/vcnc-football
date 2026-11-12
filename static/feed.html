@@ -8,6 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2300aeec'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23fff' stroke-width='2'/%3E%3Cpath d='M16 4v5M16 23v5M4 16h5M23 16h5' stroke='%23fff' stroke-width='2'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="feed.css">
 <link rel="stylesheet" href="social.css">
+<link rel="stylesheet" href="clips.css">
 </head>
 <body data-page="1">
 
@@ -39,6 +40,12 @@
           <button class="sf-title" id="sfTitle" type="button" title="点击切换 集锦连播 / 全场录像">集锦</button>
           <span class="sf-count" id="sfCount">—</span>
           <button class="sf-fold" id="sfFold" type="button" title="收起/展开">›</button>
+        </div>
+        <!-- 自定义集锦：制作 / 云端载入 / 导入，共用同一个工作室面板 -->
+        <div class="sf-tools">
+          <button id="sfMake" type="button" title="制作自定义集锦">＋制作</button>
+          <button id="sfCloud" type="button" title="读取 B 站评论区、载入其他人的集锦">⇩云端</button>
+          <button id="sfImport" type="button" title="导入朋友分享的集锦码">⇧导入</button>
         </div>
         <div class="sf-body" id="sfBody"></div>
       </div>
@@ -314,5 +321,7 @@
 <!-- 社交功能：独立模块（二维码编码 + 左侧账号浮窗），只通过 window.VCNC 契约访问播放状态 -->
 <script src="qr.js"></script>
 <script src="social.js"></script>
+<!-- 自定义集锦：本地列表 / 评论区云同步 / 分享码，只通过 window.VCNC 契约访问播放状态 -->
+<script src="clips.js"></script>
 </body>
 </html>

@@ -18,6 +18,7 @@
 │   ├── feed.html / feed.js / feed.css   # 沉浸场前端（WebView 加载）
 │   ├── qr.js                            # 纯 JS QR 编码器（byte/ECC M/v1~10，离线无依赖）
 │   ├── social.js / social.css           # 左侧账号浮窗、App 授权登录、画质与三连
+│   ├── clips.js / clips.css             # 自定义集锦：本地列表、工作室面板、分享码、评论区云同步
 │   ├── index.html                      # 默认首页，跳转到 feed.html
 │   ├── app-icon.png                    # 设置页品牌图标（与 launcher 图标同源）
 │   ├── share-qr.png                    # 最新版下载页二维码
@@ -27,12 +28,13 @@
 │   ├── gen_share_assets.py              # 生成分享/捐赠二维码
 │   ├── release_gate.py                  # 发布门禁（版本/资源/语法/APK/文档/真机）
 │   └── make_release.py                  # 创建 GitHub Release 并上传 APK
-├── server.py                           # 桌面调试服务器（/api/feed、/api/resolve、/api/media、/api/net/stat + 磁盘缓存）
+├── server.py                           # 桌面调试服务器（resolve / feed / media / net / replies / clips + 磁盘缓存）
 ├── social.py                            # 桌面版 B 站账号模块（与 Android BiliSocial.java 同语义）
 ├── start.cmd                           # Windows 一键起桌面版
+├── share/index.html                     # 微信 H5 中转页（GitHub Pages 静态托管，数据在 URL fragment）
 ├── _cache/                              # 桌面版视频磁盘缓存（运行时生成，已 gitignore）
 ├── android/
-│   ├── build_apk.sh / build_apk.bat     # 免 Gradle 离线构建（同时把 3 张 PNG 复制进 assets）
+│   ├── build_apk.sh / build_apk.bat     # 免 Gradle 离线构建（复制 3 张 PNG + 5 个 JS/CSS 模块进 assets）
 │   ├── make_apk.py                      # 合并 dex + assets
 │   └── app/src/main/
 │       ├── AndroidManifest.xml         # 包名 com.vcncfootball，versionCode/Name，
@@ -362,6 +364,25 @@ manifest 用 `@string/app_name` 引用而非硬编码，系统按语言自动切
 - 标题过长时会被省略号截断。为了让截断后仍看得出是哪一场，`ClipPlayer.render()` 在
   **显示时**去掉开头的 `[实况录像+集锦]` 这类分类标签（副标题里已有「集锦」），
   完整标题写进 `title` 属性；`VCNC.getState().title` 仍是原始完整标题。
+
+---
+
+## 自定义集锦模块
+
+数据格式、评论区协议、分享码与微信跳转的完整设计见 [自定义集锦方案](CUSTOM_CLIPS.md)，这里只记工程接线。
+
+| 层 | 落点 |
+|---|---|
+| 本地持久化 | `clips.js` → `localStorage['vcnc.clips.v1']`，`{ bvid: { nick, list:[clip] } }`，未登录也能用 |
+| 播放序列 | `feed.js: ClipPlayer.buildSegs()` 开头把 `VCNCClips.forVideo(bvid)` 返回的伪 matched 项 `concat` 进官方时间戳，共用排序 / 截断 / 连播调度；自定义片段带 `src / user / cid`，且**不吃自动补时**（用户框的是精确起止） |
+| 时间轴 | 制作时 `VCNC.getTime().orig`（`toOrig(currentTime)`）落盘，和置顶评论同一条原始录像时钟；播放时 `toStream()` 换回，校准改动不会让片段漂移 |
+| 浮窗 | `renderSegFloat()` 给行加 `.src-mine / .src-cloud / .src-other` 配色；`.sf-tools` 三个按钮共用一个 `#clipsStudio` 面板，`inChrome()` 与 `body.chrome-off` 都把它算进去 |
+| 评论区读写 | 两端 `/api/replies`（GET）、`/api/clips/publish`、`/api/clips/delete`（POST + 同源校验）；`BiliSocial.java` / `social.py` 各用 `x/v2/reply/add|del`，前端统一解析 `【VCNC集锦v1】` 格式 |
+| 自动读回 | `clips.js` 2s 轮询 `VCNCSocial.getMe()`，登录态 false→true 或换场时拉一次；`-412` / 空结果按 30s 退避，防止把 IP 打进更长的黑名单 |
+| 分享导入 | `VC1.<base64url>.<crc8>`；`shareText` 桥发微信，H5 中转页 `share/index.html` 试 `vcncfootball://import?b=&d=`，微信拦下就用 `getClipboardText()` 桥 + 粘贴兜底；`MainActivity.handleIntent` 把码写成 `feed.html?imp=` |
+
+`_test/verify_clips_codec.js` 是免设备编解码回归（Node + 最小 DOM 桩，27 项）；
+`_test/verify_clips.js` 是真机 CDP 专项（DOM / 契约 / 混排配色 / 面板开合，跑完自动删掉临时片段）。
 
 ---
 

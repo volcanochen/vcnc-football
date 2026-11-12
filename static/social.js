@@ -622,6 +622,8 @@
   global.VCNCSocial = {
     refreshMe: refreshMe,
     openLogin: openLogin,
+    /** 自定义集锦用它判断登录态 / 取 mid 区分「我的」与「别人的」评论 */
+    getMe: function () { return me; },
     /** 验收脚本用：展开兜底区并绘制二维码，检查自研 QR 编码器仍可用 */
     showQr: function () { openAlt(); showQr(); },
     /** 设置页旧的手填 Cookie 输入框保存时同步到后端，避免两套凭证不一致 */

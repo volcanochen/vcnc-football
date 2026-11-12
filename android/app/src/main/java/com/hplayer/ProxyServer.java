@@ -271,6 +271,20 @@ public class ProxyServer extends Thread {
             }
             Map<String, String> q = parseQuery(postBody);
             sendJson(os, 200, BiliSocial.triple(q.getOrDefault("bvid", "")).toString());
+        } else if ("/api/clips/publish".equals(path) || "/api/clips/delete".equals(path)) {
+            // 自定义集锦写 B 站评论区：登录态在后端，前端拿不到 SESSDATA；
+            // 只接受本应用发起的同源 POST，避免第三方网页借本地代理替用户发评论。
+            if (!"POST".equals(method) || !sameOrigin(headers)) {
+                sendJson(os, 403, "{\"ok\":false,\"error\":\"集锦发布只接受本应用发起的 POST 请求\"}");
+                return;
+            }
+            Map<String, String> q = parseQuery(postBody);
+            String oid = q.getOrDefault("oid", "");
+            String bvid = q.getOrDefault("bvid", "");
+            JSONObject out = "/api/clips/delete".equals(path)
+                    ? BiliSocial.clipsDelete(oid, bvid, parseLong(q.get("rpid"), 0))
+                    : BiliSocial.clipsPublish(oid, bvid, q.getOrDefault("message", ""));
+            sendJson(os, 200, out.toString());
         } else if ("/api/resolve".equals(path)) {
             Map<String, String> q = parseQuery(query);
             String raw = q.getOrDefault("url", "");
@@ -306,7 +320,8 @@ public class ProxyServer extends Thread {
             int ps = parseInt(q.get("ps"), 20);
             try {
                 if (aid.isEmpty()) throw new RuntimeException("缺少 aid");
-                JSONArray replies = BiliApi.fetchReplies(aid, maxPages, ps);
+                // 自定义集锦要翻更多页找带标记的评论；上限 15 页避免风控/流量失控
+                JSONArray replies = BiliApi.fetchReplies(aid, Math.min(Math.max(maxPages, 1), 15), ps);
                 JSONArray hits = BiliApi.extractTimestamps(replies);
                 JSONObject out = new JSONObject();
                 out.put("ok", true);
@@ -526,6 +541,9 @@ public class ProxyServer extends Thread {
 
     private static int parseInt(String s, int def) {
         try { return s == null ? def : Integer.parseInt(s.trim()); } catch (Exception e) { return def; }
+    }
+    private static long parseLong(String s, long def) {
+        try { return s == null ? def : Long.parseLong(s.trim()); } catch (Exception e) { return def; }
     }
 
     // ---------------------------------------------------------------- 集锦预取

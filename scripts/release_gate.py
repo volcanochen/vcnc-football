@@ -176,11 +176,11 @@ def main():
     # --- 源码语法与兼容红线 ---
     def c_js():
         bad = []
-        for f in ("static/feed.js", "static/qr.js", "static/social.js"):
+        for f in ("static/feed.js", "static/qr.js", "static/social.js", "static/clips.js"):
             rc, out = run(["node", "--check", f])
             if rc != 0:
                 bad.append(f + ": " + out.strip()[:120])
-        return not bad, "node --check 3 个 JS 文件" if not bad else "; ".join(bad)
+        return not bad, "node --check 4 个 JS 文件" if not bad else "; ".join(bad)
 
     def c_py():
         files = ["server.py", "social.py", "scripts/make_release.py", "scripts/gen_brand_assets.py",
@@ -196,8 +196,8 @@ def main():
         return not bad, "Python AST 编译 %d 个文件" % len(files) if not bad else "语法错误 " + ",".join(bad)
 
     def c_redline():
-        js = "\n".join(read(rel("static", f)) for f in ("feed.js", "qr.js", "social.js"))
-        css = "\n".join(read(rel("static", f)) for f in ("feed.css", "social.css"))
+        js = "\n".join(read(rel("static", f)) for f in ("feed.js", "qr.js", "social.js", "clips.js"))
+        css = "\n".join(read(rel("static", f)) for f in ("feed.css", "social.css", "clips.css"))
         # 先剥掉注释，避免文档性文字误报
         js_n = re.sub(r"/\*.*?\*/|//[^\n]*", "", js, flags=re.S)
         css_n = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
@@ -254,8 +254,8 @@ def main():
         bat = read(rel("android/build_apk.bat"))
         ok = all(("static/" + f in sh or f in sh) and f in bat
                  for f in ("app-icon.png", "share-qr.png", "donate-qr.png",
-                           "qr.js", "social.js", "social.css"))
-        return ok, "两个构建脚本都复制 3 张 PNG + 社交模块 3 个文件"
+                           "qr.js", "social.js", "social.css", "clips.js", "clips.css"))
+        return ok, "两个构建脚本都复制 3 张 PNG + 社交 3 个 + 集锦 2 个文件"
 
     check("图标 / 二维码资源", c_icons)
     check("中英文名称资源", c_labels)
@@ -264,7 +264,7 @@ def main():
     # --- APK 内容与签名 ---
     def c_apk_assets():
         want = ["assets/www/" + f for f in ("index.html", "feed.html", "feed.js", "feed.css",
-                                            "qr.js", "social.js", "social.css",
+                                            "qr.js", "social.js", "social.css", "clips.js", "clips.css",
                                             "app-icon.png", "share-qr.png", "donate-qr.png")]
         with zipfile.ZipFile(APK) as z:
             names = set(z.namelist())
@@ -300,7 +300,7 @@ def main():
     # --- 文档与接口对齐 ---
     def c_links():
         docs = ["README.md", "docs/TECHNICAL.md", "docs/DEVELOPMENT_HISTORY.md",
-                "docs/RELEASE_GATE.md", "release/README.md"]
+                "docs/RELEASE_GATE.md", "docs/CUSTOM_CLIPS.md", "release/README.md"]
         miss = []
         for d in docs:
             p = rel(d)
@@ -313,7 +313,7 @@ def main():
                 target = link.split("#")[0]
                 if target and not os.path.isfile(os.path.normpath(os.path.join(os.path.dirname(p), target))):
                     miss.append(d + "→" + link)
-        return not miss, "5 份文档相对链接全部有效" if not miss else "失效 " + ",".join(miss[:5])
+        return not miss, "6 份文档相对链接全部有效" if not miss else "失效 " + ",".join(miss[:5])
 
     def c_api_parity():
         java = read(rel("android/app/src/main/java/com/hplayer/ProxyServer.java"))
@@ -322,12 +322,13 @@ def main():
         routes = ("/api/net/stat", "/api/net/reset",
                   "/api/social/auth", "/api/social/qrcode", "/api/social/poll",
                   "/api/social/me", "/api/social/triple", "/api/social/logout",
-                  "/api/social/manual")
+                  "/api/social/manual",
+                  "/api/replies", "/api/clips/publish", "/api/clips/delete")
         pairs = [(r, java, py) for r in routes]
         bad = [r for r, a, b in pairs if r not in a or r not in b]
         extra = [x for x in ("netHud", "netStat", "netReset", "setBackTop")
                  if x not in html]
-        return not bad and not extra, "两端流量+社交接口对齐 + 前端 4 个控件齐全" if not (bad or extra) else \
+        return not bad and not extra, "两端流量+社交+集锦接口对齐 + 前端 4 个控件齐全" if not (bad or extra) else \
             "缺 " + ",".join(bad + extra)
 
     def c_social_files():
@@ -365,6 +366,27 @@ def main():
         bad = [k for k, v in want.items() if not v]
         return not bad, "App 授权主路径 %d 项齐全" % len(want) if not bad else "缺 " + ",".join(bad)
 
+    def c_clips_codec():
+        """自定义集锦的分享码 / 评论文本编解码，纯 Node 免真机。"""
+        rc, out = run(["node", "_test/verify_clips_codec.js"], timeout=120)
+        m = re.search(r"(\d+) PASS / (\d+) FAIL", out)
+        ok = rc == 0 and m and int(m.group(2)) == 0 and int(m.group(1)) >= 25
+        return bool(ok), ("%s 项编解码回归全绿" % m.group(1)) if ok else out.strip()[-200:]
+
+    def c_clips_files():
+        want = ("static/clips.js", "static/clips.css", "docs/CUSTOM_CLIPS.md",
+                "share/index.html", "_test/verify_clips.js", "_test/verify_clips_codec.js")
+        miss = [f for f in want if not os.path.isfile(rel(f))]
+        java = read(rel("android/app/src/main/java/com/hplayer/MainActivity.java"))
+        manifest = read(rel("android/app/src/main/AndroidManifest.xml"))
+        bad = [] if not miss else miss[:]
+        if "getClipboardText" not in java: bad.append("剪贴板桥")
+        if 'android:scheme="vcncfootball"' not in manifest: bad.append("导入深链")
+        if "CLIP_CODE" not in java: bad.append("导入码解析")
+        return not bad, "自定义集锦 6 个文件 + 深链/剪贴板齐全" if not bad else "缺 " + ",".join(bad)
+
+    check("集锦编解码回归", c_clips_codec)
+    check("集锦模块文件", c_clips_files)
     check("文档相对链接", c_links)
     check("流量 / 社交接口两端对齐", c_api_parity)
     check("社交模块文件", c_social_files)
@@ -486,7 +508,21 @@ def main():
             check("回归 %s" % serial, c_reg)
             check("专项验收 %s" % serial, c_probe)
             check("社交验收 %s" % serial, c_social)
+            def c_clips(s=serial, p=port, e=env):
+                rc, out = run([sys.executable, "_test/cdp_eval.py", "_test/verify_clips.js"],
+                              env=e, timeout=240)
+                try:
+                    j = json.loads(out[out.index("{"):])
+                except Exception:
+                    return False, "%s 返回不是 JSON: %s" % (s, out.strip()[-160:])
+                if j.get("pass") is True:
+                    return True, "%s 自定义集锦全绿" % s
+                v = j.get("verdict") or {}
+                bad = [k for k in v if not v[k]]
+                return False, "%s 集锦未过: %s" % (s, ",".join(bad) or str(j.get("error", "无 verdict")))
+
             check("手势验收 %s" % serial, c_tap)
+            check("集锦验收 %s" % serial, c_clips)
 
     n_fail = sum(1 for _, ok, _ in RESULTS if not ok)
     print("=" * 62)

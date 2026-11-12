@@ -91,6 +91,8 @@ public class MainActivity extends Activity {
     private UpdateChecker updater;
     private String baseUrl;
     private String pendingBv = null;
+    /** 自定义集锦分享码：vcncfootball://import?d=… 或分享文本里的 VC1.… */
+    private String pendingImport = null;
     private boolean full = false;
     private String sharedTitle = null;
     /** WebView 是否已完成首次加载；false 时 evalJs 的调用会暂存 */
@@ -102,6 +104,8 @@ public class MainActivity extends Activity {
     private double resumeT = -1;
 
     private static final Pattern BV = Pattern.compile("(BV[0-9A-Za-z]{10})");
+    /** 自定义集锦分享码：VC1.<base64url>.<crc8> */
+    private static final Pattern CLIP_CODE = Pattern.compile("VC1\\.[A-Za-z0-9\\-_]+\\.[0-9a-fA-F]{2}");
     private static final Pattern AVID = Pattern.compile("av(\\d+)", Pattern.CASE_INSENSITIVE);
     private static final Pattern B23 = Pattern.compile("(https?://b23\\.tv/[^\"\\s'》\\)]+)");
     private static final Pattern B23BARE = Pattern.compile("\\bb23\\.tv/([^\"\\s'》\\)]+)");
@@ -221,9 +225,15 @@ public class MainActivity extends Activity {
 
         // 恢复现场优先于解析分享内容：Activity 被系统回收后重建（低内存 / 折叠切屏兜底重建），
         // 此时若先去 handleIntent，会用 bv 参数重新 loadUrl，导致正在播的进度被清零。
-        boolean restored = restoreSession(b);
+        // 冷启动带集锦导入码时不能走「恢复现场」：那条路径只 loadPlayer() 一次，
+        // 会把 pendingImport 留着不写进 URL，导入码静默丢失。
+        Intent cold = getIntent();
+        Uri coldData = cold == null ? null : cold.getData();
+        boolean fromClip = coldData != null && ("vcncfootball".equals(coldData.getScheme())
+                || coldData.getQueryParameter("d") != null);
+        boolean restored = !fromClip && restoreSession(b);
         if (!restored) {
-            handleIntent(getIntent());
+            handleIntent(cold);
             loadPlayer();
         }
         Log.i("HPlayer", "onCreate done: baseUrl=" + baseUrl + " pendingBv=" + pendingBv
@@ -342,10 +352,15 @@ public class MainActivity extends Activity {
             if (sharedTitle != null && !sharedTitle.isEmpty())
                 u.append("&title=").append(URLEncoder.encode(sharedTitle));
         }
+        if (pendingImport != null && !pendingImport.isEmpty()) {
+            u.append(hasParam ? "&" : "?").append("imp=").append(URLEncoder.encode(pendingImport));
+            hasParam = true;
+        }
         if (resumeIdx >= 0) {
             u.append(hasParam ? "&" : "?").append("ridx=").append(resumeIdx)
              .append("&rt=").append(String.format(java.util.Locale.US, "%.2f", Math.max(0, resumeT)));
         }
+        pendingImport = null;
         resumeIdx = -1; resumeT = -1;
         loadUrlSafe(u.toString());
     }
@@ -587,6 +602,35 @@ public class MainActivity extends Activity {
         }
         String merged = mb.toString();
         Log.i("HPlayer-Share", "candidates=" + uniq.size() + " merged=" + merged.replace("\n", " | "));
+
+        // 自定义集锦分享码优先：vcncfootball://import?b=BV…&d=VC1… ，
+        // 或 H5 中转页/微信分享文本里带的 VC1.… 纯文本码。命中就直接带着码打开对应视频，
+        // 不要再走 B 站分享解析（那条路径会因为没找到视频链接而弹兜底面板）。
+        String clipCode = null, clipBv = null;
+        Uri data = it.getData();
+        if (data != null) {
+            clipCode = data.getQueryParameter("d");
+            if (clipCode == null) clipCode = data.getQueryParameter("imp");
+            clipBv = data.getQueryParameter("b");
+        }
+        if (clipCode == null || !CLIP_CODE.matcher(clipCode).find()) {
+            Matcher cm = CLIP_CODE.matcher(merged);
+            if (cm.find()) clipCode = cm.group();
+        }
+        if (clipCode != null && CLIP_CODE.matcher(clipCode).find()) {
+            if (clipBv == null || !clipBv.matches("BV[0-9A-Za-z]{10}")) {
+                Matcher bm = BV.matcher(merged);
+                clipBv = bm.find() ? bm.group(1) : null;
+            }
+            pendingImport = clipCode;
+            pendingBv = clipBv;
+            sharedTitle = null;
+            // 只设置 pending*，由 onCreate / onNewIntent 统一调用 loadPlayer()：
+            // 这里若自己再 load 一次，onNewIntent 会紧接着 load 第二次（那时 imp 已清空），
+            // 后一次把带导入码的 URL 覆盖掉，表现为「深链打开了却没导入」。
+            Log.i("HPlayer-Share", "clip import bv=" + clipBv + " len=" + clipCode.length());
+            return;
+        }
 
         if (subject != null && !subject.isEmpty()) sharedTitle = subject;
         String target = null;
@@ -907,6 +951,18 @@ return true;
                 cm.setPrimaryClip(ClipData.newPlainText("vcnc", text == null ? "" : text));
                 Toast.makeText(MainActivity.this, "已复制", Toast.LENGTH_SHORT).show();
             } catch (Exception ignore) {}
+        }
+        /** 微信里复制了分享码后，App 内「从剪贴板导入」一键读回（WebView 自己读不到剪贴板）。 */
+        @JavascriptInterface
+        public String getClipboardText() {
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        MainActivity.this.getSystemService(Context.CLIPBOARD_SERVICE);
+                ClipData cd = cm.getPrimaryClip();
+                if (cd != null && cd.getItemCount() > 0 && cd.getItemAt(0).getText() != null)
+                    return cd.getItemAt(0).getText().toString();
+            } catch (Exception ignore) {}
+            return "";
         }
         @JavascriptInterface
         public String getVersionName() {

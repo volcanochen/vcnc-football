@@ -28,6 +28,8 @@ copy /Y "%STATIC%\feed.css"   "%WWW%\feed.css"   >nul || goto :err
 copy /Y "%STATIC%\qr.js"      "%WWW%\qr.js"      >nul || goto :err
 copy /Y "%STATIC%\social.js"  "%WWW%\social.js"  >nul || goto :err
 copy /Y "%STATIC%\social.css" "%WWW%\social.css" >nul || goto :err
+copy /Y "%STATIC%\clips.js"    "%WWW%\clips.js" >nul || goto :err
+copy /Y "%STATIC%\clips.css"   "%WWW%\clips.css" >nul || goto :err
 copy /Y "%STATIC%\app-icon.png"  "%WWW%\app-icon.png"  >nul || goto :err
 copy /Y "%STATIC%\share-qr.png"  "%WWW%\share-qr.png"  >nul || goto :err
 copy /Y "%STATIC%\donate-qr.png" "%WWW%\donate-qr.png" >nul || goto :err

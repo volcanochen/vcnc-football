@@ -367,15 +367,24 @@ def main():
         return not bad, "App 授权主路径 %d 项齐全" % len(want) if not bad else "缺 " + ",".join(bad)
 
     def c_clips_codec():
-        """自定义集锦的分享码 / 评论文本编解码，纯 Node 免真机。"""
+        """分享码 / 评论文本 / 微信 H5 中转页三处编解码，纯 Node 免真机。"""
         rc, out = run(["node", "_test/verify_clips_codec.js"], timeout=120)
         m = re.search(r"(\d+) PASS / (\d+) FAIL", out)
         ok = rc == 0 and m and int(m.group(2)) == 0 and int(m.group(1)) >= 25
-        return bool(ok), ("%s 项编解码回归全绿" % m.group(1)) if ok else out.strip()[-200:]
+        if not ok:
+            return False, "编解码回归失败：" + out.strip()[-160:]
+        # 中转页独立实现了一份 crc8/base64url，漂移会让微信里点开变成「链接损坏」
+        rc2, out2 = run(["node", "_test/verify_share_page.js"], timeout=120)
+        m2 = re.search(r"(\d+) PASS / (\d+) FAIL", out2)
+        ok2 = rc2 == 0 and m2 and int(m2.group(2)) == 0 and int(m2.group(1)) >= 10
+        if not ok2:
+            return False, "H5 中转页回归失败：" + out2.strip()[-160:]
+        return True, "%s 项编解码 + %s 项 H5 页回归全绿" % (m.group(1), m2.group(1))
 
     def c_clips_files():
         want = ("static/clips.js", "static/clips.css", "docs/CUSTOM_CLIPS.md",
-                "share/index.html", "_test/verify_clips.js", "_test/verify_clips_codec.js")
+                "share/index.html", "_test/verify_clips.js", "_test/verify_clips_codec.js",
+                "_test/verify_share_page.js")
         miss = [f for f in want if not os.path.isfile(rel(f))]
         java = read(rel("android/app/src/main/java/com/hplayer/MainActivity.java"))
         manifest = read(rel("android/app/src/main/AndroidManifest.xml"))
@@ -383,7 +392,7 @@ def main():
         if "getClipboardText" not in java: bad.append("剪贴板桥")
         if 'android:scheme="vcncfootball"' not in manifest: bad.append("导入深链")
         if "CLIP_CODE" not in java: bad.append("导入码解析")
-        return not bad, "自定义集锦 6 个文件 + 深链/剪贴板齐全" if not bad else "缺 " + ",".join(bad)
+        return not bad, "自定义集锦 7 个文件 + 深链/剪贴板齐全" if not bad else "缺 " + ",".join(bad)
 
     check("集锦编解码回归", c_clips_codec)
     check("集锦模块文件", c_clips_files)

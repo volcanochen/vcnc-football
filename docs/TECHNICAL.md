@@ -382,7 +382,10 @@ manifest 用 `@string/app_name` 引用而非硬编码，系统按语言自动切
 | 分享导入 | `VC1.<base64url>.<crc8>`；`shareText` 桥发微信，H5 中转页 `share/index.html` 试 `vcncfootball://import?b=&d=`，微信拦下就用 `getClipboardText()` 桥 + 粘贴兜底；`MainActivity.handleIntent` 把码写成 `feed.html?imp=` |
 
 `_test/verify_clips_codec.js` 是免设备编解码回归（Node + 最小 DOM 桩，27 项）；
+`_test/verify_share_page.js` 把微信中转页的内联脚本放进同一类 DOM 桩执行（11 项），
+防止 H5 页独立实现的 `crc8` / `base64url` 与 App 内 `clips.js` 漂移；
 `_test/verify_clips.js` 是真机 CDP 专项（DOM / 契约 / 混排配色 / 面板开合，跑完自动删掉临时片段）。
+三条线里前两条已并入发布门禁的「集锦编解码回归」，第三条是每台真机的「集锦验收」。
 
 ---
 

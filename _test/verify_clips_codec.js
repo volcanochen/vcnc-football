@@ -163,10 +163,38 @@ ok('编辑态放开段末推进 / 快拖钳段 / 进度条按原片',
    /if \(!free && ct >= end - 0\.012\)/.test(feedSrc) &&
    /target = free \? clamp\(target, 0, vdur/.test(feedSrc) &&
    /var span = free \?/.test(feedSrc));
-ok('慢动作三档改为 SVG 图标且保留 data-rate',
+const fracPairs = [['0.5', '2'], ['0.25', '4'], ['0.125', '8']];
+const fracOk = fracPairs.every(p => {
+  const re = new RegExp('class="cbtn slow" data-rate="' + p[0].replace(/\./g, '\\.') +
+                        '"[^>]*>([\\s\\S]*?)<\\/button>');
+  const m = htmlSrc.match(re);
+  return !!(m && m[1].indexOf('<svg') >= 0 && m[1].indexOf('>1</text>') >= 0 &&
+            m[1].indexOf('>' + p[1] + '</text>') >= 0 && m[1].indexOf('M5 12.5h14') >= 0);
+});
+ok('慢动作三档为 1/2、1/4、1/8 分数图标且保留 data-rate',
    (htmlSrc.match(/class="cbtn slow" data-rate="(0\.5|0\.25|0\.125)"/g) || []).length === 3 &&
    (htmlSrc.match(/class="cbtn slow" data-rate="[^"]+"[^>]*><svg/g) || []).length === 3 &&
-   !/>0\.5×</.test(htmlSrc) && !/>0\.125×</.test(htmlSrc));
+   fracOk && !/>0\.5×</.test(htmlSrc) && !/>0\.125×</.test(htmlSrc));
+
+// 9) 编辑会话：临时进全视频 / 保存片段不打断 / 退出归位片段（源码级）
+ok('编辑会话：进入记现场、关闭归位片段、模式全程不变',
+   /function enterStudio\(\)/.test(feedSrc) &&
+   /function leaveStudio\(\)/.test(feedSrc) &&
+   /function studioLanding\(/.test(feedSrc) &&
+   /studioSession\s*=\s*\{\s*mode:\s*SETTINGS\.mode/.test(feedSrc) &&
+   /callVCNC\('enterStudio'\)/.test(src) &&
+   /function closeStudio\(\)/.test(src) &&
+   /callVCNC\('leaveStudio'\)/.test(src) &&
+   typeof C.closeStudio === 'function');
+const rbBlock = feedSrc.slice(feedSrc.indexOf('rebuildClips: function'),
+                              feedSrc.indexOf('goVideo: function'));
+ok('编辑态保存片段只轻量重算序列，不 stopAll+activate 打断自由播放',
+   /if \(isStudioFree\(\)\)/.test(rbBlock) && /c\.buildSegs\(/.test(rbBlock) &&
+   !/c\.stopAll\(/.test(rbBlock) && !/c\.activate\(/.test(rbBlock));
+ok('编辑态进度条按整场 0~时长并提示「整场」',
+   /var base = free \? 0 : seg\.start;/.test(feedSrc) && /编辑（整场）/.test(feedSrc));
+ok('编辑态点片段行只按原片时间 seek，不切段',
+   /if \(isStudioFree\(\)\) \{ this\.seekStream/.test(feedSrc));
 
 console.log('\n结果：' + pass + ' PASS / ' + fail + ' FAIL');
 process.exit(fail ? 1 : 0);

@@ -48,7 +48,7 @@
 ```bash
 python _test/verify_qr_matrix.py     # QR 矩阵与标准库逐点比对（需 node + Python qrcode 库，仅测试用）
 python _test/verify_social_api.py    # 桌面端点冒烟（含集锦空内容/未登录/非法 rpid/跨站 403），不发真实评论
-node _test/verify_clips_codec.js     # 分享码 + 评论文本编解码 43 项（含行内编辑/发布记录 + UI 批次源码契约），纯 Node 免真机
+node _test/verify_clips_codec.js     # 分享码 + 评论文本编解码 47 项（含行内编辑/发布记录 + UI/编辑会话源码契约），纯 Node 免真机
 node _test/verify_share_page.js      # 微信 H5 中转页解码 11 项（正常码/查询串/篡改/缺码/中文）
 python _test/verify_risk_guard.py   # 风控断路器 + 快照降级 44 项，替身 urlopen 不发真实请求
 ```

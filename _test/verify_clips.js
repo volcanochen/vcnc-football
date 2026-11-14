@@ -19,7 +19,7 @@
   out.api = C ? ['forVideo', 'mineOnlyState', 'setMineOnly', 'localList', 'addLocal',
                  'delLocal', 'updateLocal', 'pubSet', 'markPublished',
                  'encodeShare', 'decodeShare', 'packComment', 'parseComment',
-                 'parseGroups', 'loadCloud', 'openStudio', 'studioOpen']
+                 'parseGroups', 'loadCloud', 'openStudio', 'closeStudio', 'studioOpen']
                  .filter(function (k) { return typeof C[k] !== 'function'; }) : ['(module missing)'];
 
   if (!C || !V) { out.pass = false; out.error = 'VCNCClips / VCNC 契约缺失'; return out; }
@@ -148,6 +148,11 @@
       out.steps.layer = { onPlay: vis(s) };
       // 工作室打开 → 编辑态自由播放生效；关闭 → 恢复集锦连播语义
       out.steps.studioFree = { on: !!(window.isStudioFree && window.isStudioFree()) };
+      // 编辑会话：进入时记下模式现场，退出后模式必须原样不变
+      out.steps.studioSession = {
+        entered: !!(V.studioSessionState && V.studioSessionState()),
+        modeBefore: window.SETTINGS ? window.SETTINGS.mode : null
+      };
       return wait(350)
         .then(function () {
           if (typeof window.goPage === 'function') window.goPage(0);
@@ -163,9 +168,9 @@
         .then(function () {
           out.steps.layer.onModal = vis(s);
           document.body.classList.remove('soc-modal-open');
-          s.hidden = true;
-          out.steps.studioFree.off = !(window.isStudioFree && window.isStudioFree());
-          return wait(350);
+          C.closeStudio();          // 真实关闭路径：先归位片段序列再退出自由播放
+          out.steps.studioFree.off = !C.studioOpen();
+          return wait(450);
         });
     })
     .then(function () {
@@ -178,14 +183,36 @@
     })
     .then(function () {
       out.steps.restored = C.localList(bvid).length === before;
-      // 2026-11-15 批次：慢动作三档改形象图标；全场/集锦 tab 共用同一份片段列表
+      // 编辑会话退出后：现场清空、模式不变、播放时间回到某个片段窗口内
+      var ss = out.steps.studioSession || {};
+      ss.left = !(V.studioSessionState && V.studioSessionState());
+      ss.modeAfter = window.SETTINGS ? window.SETTINGS.mode : null;
+      var c2 = window.activeClip && window.activeClip();
+      var d2 = c2 && c2.decks && c2.decks[c2.activeDeck];
+      var sg = c2 && c2.segs && c2.segs[c2.idx];
+      var ct2 = d2 && d2.v ? d2.v.currentTime : -1;
+      // 解析失败 / 未起播时不强求归位（没有可归位的播放现场），只校验会话与模式
+      ss.playerReady = !!(c2 && c2.state === 'ready' && c2.idx >= 0 && sg);
+      ss.playerState = c2 ? c2.state : 'none';
+      ss.inSeg = !!(sg && ct2 >= sg.start - 1 && ct2 <= sg.start + sg.dur + 1);
+      out.steps.studioSession = ss;
+      // 2026-11-15 批次：慢动作三档 ½/¼/⅛ 分数图标；全场/集锦 tab 共用同一份片段列表
       var slowBtns = document.querySelectorAll('#cornerCtl .cbtn.slow');
-      var svgCount = 0, textCount = 0;
+      var svgCount = 0, textCount = 0, denoms = [];
       for (var z = 0; z < slowBtns.length; z++) {
-        if (slowBtns[z].querySelector('svg')) svgCount++;
-        if (slowBtns[z].textContent.replace(/\s/g, '')) textCount++;
+        var b = slowBtns[z], sv = b.querySelector('svg');
+        if (sv) {
+          svgCount++;
+          var ts = sv.querySelectorAll('text');
+          denoms.push(ts.length ? ts[ts.length - 1].textContent : '');
+        }
+        var direct = '';
+        for (var n = 0; n < b.childNodes.length; n++)
+          if (b.childNodes[n].nodeType === 3) direct += b.childNodes[n].textContent;
+        if (direct.replace(/\s/g, '')) textCount++;
       }
-      out.steps.slowIcons = { total: slowBtns.length, svg: svgCount, text: textCount };
+      out.steps.slowIcons = { total: slowBtns.length, svg: svgCount, text: textCount,
+                              denoms: denoms.join(',') };
       var modeBefore = window.SETTINGS ? window.SETTINGS.mode : null;
       if (typeof window.togglePlayMode !== 'function' || modeBefore !== 'hl') {
         out.steps.fullTab = { skipped: true, mode: modeBefore };
@@ -227,7 +254,12 @@
         studioFree: !!(out.steps.studioFree && out.steps.studioFree.on === true &&
                        out.steps.studioFree.off === true),
         slowIcons: out.steps.slowIcons.total === 3 && out.steps.slowIcons.svg === 3 &&
-                   out.steps.slowIcons.text === 0,
+                   out.steps.slowIcons.text === 0 &&
+                   out.steps.slowIcons.denoms === '2,4,8',
+        studioSession: !!(out.steps.studioSession && out.steps.studioSession.entered &&
+                          out.steps.studioSession.left &&
+                          out.steps.studioSession.modeAfter === out.steps.studioSession.modeBefore &&
+                          (!out.steps.studioSession.playerReady || out.steps.studioSession.inSeg)),
         fullTab: !!(out.steps.fullTab && out.steps.fullTab.ok === true),
         layer: !out.steps.layer.skipped &&
                out.steps.layer.onPlay.op === 1 && out.steps.layer.onPlay.pe !== 'none' &&

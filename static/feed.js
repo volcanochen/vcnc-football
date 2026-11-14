@@ -158,12 +158,75 @@ var QN = readQn();
 var LEAD = 0.35;          // 段末预热提前量
 var PAD_MIN = 0, PAD_MAX = 15, PAD_STEP = 0.5;
 
-/** 工作室打开时进入「自由播放」：视频元素本来加载的就是整场流，
- *  集锦段只是时间窗口。放开段末推进与快拖钳段，编辑时画面按完整原片连续播放，
- *  不打断当前进度、不改 SETTINGS.mode（关掉工作室即恢复原来的连播语义）。 */
+/** 工作室编辑会话：进入时临时借用完整原片时间轴，退出时归位到片段序列。
+ *  视频元素本来加载的就是整场流，集锦段只是时间窗口；所以不切 SETTINGS.mode
+ *  （切模式会 stopAll+activate 打断画面，还会把 full 写进存盘），而是放开
+ *  段末推进 / 快拖钳段 / 进度条口径，全程模式不变 = 「临时进全视频」。
+ *  现场（进入时的模式 / 段号 / 时间）留给 leaveStudio 做归位。 */
+var studioSession = null;
+var studioLeaving = false;   // 归位 jumpTo 未完成时仍按自由播放，防 tick 抢判段末
 function isStudioFree() {
-  return !!(window.VCNCClips && window.VCNCClips.studioOpen &&
-            window.VCNCClips.studioOpen());
+  var open = !!(window.VCNCClips && window.VCNCClips.studioOpen &&
+                window.VCNCClips.studioOpen());
+  // 外部（测试/CSS）直接把面板 hidden 时清掉残留现场，避免下次进入带着旧现场
+  if (!open && !studioLeaving && studioSession) studioSession = null;
+  return open || studioLeaving;
+}
+function enterStudio() {
+  /* 视频解析失败 / 还没起播（state=error、idx=-1）时也要记现场：
+     模式不变是编辑会话的语义，不该依赖播放器是否 ready。 */
+  var c = activeClip();
+  var d = c && c.decks && c.decks[c.activeDeck];
+  if (!studioSession) {
+    studioSession = { mode: SETTINGS.mode, idx: c ? c.idx : -1,
+                      ct: d && d.v ? d.v.currentTime : 0 };
+  }
+  return true;
+}
+/** 把自由播放的整场时间 ct 归位到片段序列：落在段内就从同一画面继续播，
+ *  落在段间隙就跳到下一个片段段头，越过末段则回末段。保存过片段后 segs
+ *  已重建，所以一律按当前序列重新查找，不用进入时记下的旧 idx。 */
+function studioLanding(c, ct) {
+  var segs = c.segs || [], i;
+  for (i = 0; i < segs.length; i++) {
+    if (ct >= segs[i].start && ct < segs[i].start + segs[i].dur - 0.05)
+      return { idx: i, off: ct - segs[i].start };
+  }
+  for (i = 0; i < segs.length; i++) {
+    if (segs[i].start > ct) return { idx: i, off: 0 };
+  }
+  if (segs.length) {
+    var last = segs.length - 1;
+    return { idx: last, off: clamp(ct - segs[last].start, 0,
+                                   Math.max(0, segs[last].dur - 1)) };
+  }
+  return null;
+}
+/** 关掉工作室：仍是片段模式就切回按片段连播的语义（同画面继续 / 落到下一段），
+ *  jumpTo 会强制起播，所以结束后按进入时是否在播复位暂停状态。 */
+function leaveStudio() {
+  var s = studioSession;
+  studioSession = null;
+  if (!s) return false;
+  var c = activeClip();
+  if (!c || c.state !== 'ready' || c.idx < 0 || SETTINGS.mode !== 'hl') return false;
+  var d = c.decks && c.decks[c.activeDeck];
+  var ct = d && d.v ? d.v.currentTime : s.ct;
+  var land = studioLanding(c, ct);
+  if (!land) return false;
+  var wasPlaying = !!c.playing;
+  studioLeaving = true;
+  var done = function () {
+    studioLeaving = false;
+    if (!wasPlaying) c.pauseAll();
+    syncSegFloatActive();
+  };
+  c.jumpTo(land.idx, { user: true, seekOffset: land.off > 0.2 ? land.off : 0 })
+    .then(done, done);
+  setTimeout(function () { studioLeaving = false; }, 3000);  // 排队/异常兜底，绝不永久停在编辑态
+  diag('studio leave: mode=' + s.mode + ' ct=' + ct.toFixed(1) +
+       ' -> idx=' + land.idx + ' off=' + land.off.toFixed(1));
+  return true;
 }
 
 /* 折叠屏 / 超高像素大屏（N6 展开 2480x2248）同时解码两路视频会把合成器压死：
@@ -1457,6 +1520,7 @@ ClipPlayer.prototype.tick = function (now) {
   var cur = this.decks[this.activeDeck];
   var seg = this.segs[this.idx];
   if (!seg) return;
+  var free = isStudioFree();
   // 卡死看门狗：状态上是「在播」，但解码器停住（元素被内部暂停 / readyState 掉底）
   // → 先轻推 currentTime 强制重新出帧；反复推不活 → 重新准备本段。修两类真机问题：
   //    ① 横滑回退后画面冻住  ② 暂停后继续播放画面不动
@@ -1474,9 +1538,16 @@ ClipPlayer.prototype.tick = function (now) {
         if (this.hasAudio) safePlay(cur.a);
       } else {
         this.stallTries = 0;
-        diag('stall re-prepare idx=' + this.idx);
-        this.jumpTo(this.idx, { seekOffset: clamp(cur.v.currentTime - seg.start, 0, seg.dur) });
-        return;
+        if (free) {
+          // 编辑态只轻推整场时间轴，绝不重新 prepare 段（会把画面拉回片段窗口）
+          try { cur.v.currentTime = Math.max(0, cur.v.currentTime + 0.02); } catch (e) {}
+          safePlay(cur.v);
+          if (this.hasAudio) safePlay(cur.a);
+        } else {
+          diag('stall re-prepare idx=' + this.idx);
+          this.jumpTo(this.idx, { seekOffset: clamp(cur.v.currentTime - seg.start, 0, seg.dur) });
+          return;
+        }
       }
     }
   } else { this.stallSince = 0; this.stallTries = 0; }
@@ -1487,7 +1558,7 @@ ClipPlayer.prototype.tick = function (now) {
   // 段尾（WebView 会吞 seek），tick 按旧位置判段末 → onSegmentEnd → 自动推进
   // 下一段 = 用户「点 A 播 A+1」。保护窗内：seeking 中不判段末；seek 被吞
   // （窗内 ct 仍 ≥ 段尾）自动补发；2.5s 超时兜底放行，绝不卡死段末判定
-  if (this.replayGuardAt != null) {
+  if (!free && this.replayGuardAt != null) {
     if (performance.now() - this.replayGuardAt < 2500) {
       if (cur.v.seeking) return;
       if (ct >= end - 0.012) {
@@ -1500,7 +1571,6 @@ ClipPlayer.prototype.tick = function (now) {
       this.replayGuardAt = null;
     }
   }
-  var free = isStudioFree();
   // 工作室（编辑）打开时按完整原片播放：跳过段末预热/自动推进，
   // 让 video.currentTime 自然越过段窗口，画面连续播下去。
   if (!free) this.followPreheated(ct, end);
@@ -1511,16 +1581,18 @@ ClipPlayer.prototype.tick = function (now) {
 ClipPlayer.prototype.hud = function (ct, end) {
   if (page !== 1) return;
   syncSegFloatActive();          // 当前段高亮 / 锁定态（有状态守卫，不随帧改 DOM）
-  var seg = this.segs[this.idx];
-  if (!seg) return;
-  // 编辑态按整场时长算进度，否则越过段窗口后进度条会一直钉在 100%
   var free = isStudioFree();
-  var span = free ? Math.max(0.1, (this.videoDuration || (seg.start + seg.dur)) - seg.start)
+  var seg = this.segs[this.idx];
+  if (!free && !seg) return;   // 编辑态保存片段会重建 segs，进度条不依赖当前段
+  /* 编辑态＝完整原片时间轴：进度条按 0 ~ videoDuration 算，往片段之前拖也能
+     正确显示；正常播放仍按当前段的 start ~ start+dur 口径。 */
+  var base = free ? 0 : seg.start;
+  var span = free ? Math.max(0.1, this.videoDuration || (seg ? seg.start + seg.dur : 600))
                   : Math.max(0.1, seg.dur);
-  var p = clamp((ct - seg.start) / span, 0, 1);
+  var p = clamp((ct - base) / span, 0, 1);
   this.fillEl.style.width = (p * 100).toFixed(1) + '%';
   var sub = dateStr(this.item.pubdate);
-  if (free) sub += ' · 编辑（原片）';
+  if (free) sub += ' · 编辑（整场）';
   else if (SETTINGS.mode === 'hl' && this.segs.length) sub += ' · 集锦 ' + (this.idx + 1) + '/' + this.segs.length;
   else sub += ' · 原片 ' + fmt(this.videoDuration);
   if (!free && SETTINGS.mode === 'hl' && this.catActive) {
@@ -3232,6 +3304,9 @@ function syncSegFloatActive() {
 ClipPlayer.prototype.userJump = function (i) {
   if (SETTINGS.mode === 'full') { this.seekStream((this.floatSegs[i] || {}).start); return; }
   if (i < 0 || i >= this.segs.length) return;
+  /* 编辑态：点片段行只把画面移到该片段在原片里的起点，不切段、不重建序列，
+     免得整场自由播放被 jumpTo 打断。 */
+  if (isStudioFree()) { this.seekStream(this.segs[i].start); return; }
   if (this.busy) {
     this.queuedJump = { i: i, opts: { user: true } };
     diag('jump queued i=' + (i + 1) + '/' + this.segs.length);
@@ -5765,7 +5840,27 @@ window.VCNC = {
     var c = activeClip();
     if (c && c.state === 'ready' && c.playing) c.togglePlay(true);
   },
-  rebuildClips: function () { rebuildActiveSegs('自定义集锦已更新'); },
+  /* 编辑会话：打开工作室记录现场，关闭时归位到片段序列 */
+  enterStudio: enterStudio,
+  leaveStudio: leaveStudio,
+  studioSessionState: function () {
+    return studioSession ? { mode: studioSession.mode, idx: studioSession.idx } : null;
+  },
+  rebuildClips: function () {
+    /* 编辑态保存片段：只重算片段序列（buildSegs 内部会重画浮窗），绝不
+       stopAll+activate —— 否则刚保存就按片段重新起播，整场自由播放被拦腰打断。 */
+    if (isStudioFree()) {
+      var c = activeClip();
+      if (c && c.state === 'ready') {
+        c.buildSegs((c.info && c.info.matched) || []);
+        c.tracks = [];
+        updateCatCount();
+        syncCatChips();
+        return true;
+      }
+    }
+    return rebuildActiveSegs('自定义集锦已更新');
+  },
   goVideo: function (bvid) {
     if (!bvid) return false;
     try { location.href = 'feed.html?bv=' + encodeURIComponent(bvid); } catch (e) { return false; }

@@ -413,21 +413,22 @@ manifest 用 `@string/app_name` 引用而非硬编码，系统按语言自动切
 | 行内编辑 | 工作室「本场片段」行点文字（`.editable`）展开编辑态：起点（`t2s` 解析 `mm:ss`/秒）/ 时长 / 备注，`updateLocal()` 校验（`cleanClip`）后按起点重排并 `rebuild()`；非法值拒绝。分享按钮 `cs-mini.icon` 内联 SVG（Material share 图标） |
 | 制作面板 | 只有起点 / 终点 / 预设备注 / 自定义文字框 / 保存五个控件；无编号标题、无步骤说明，**起点/终点按钮点亮时把画面时钟写进按钮文字**（`起点 4:02` / `终点 4:19`，未设置仍是原文字），区间另写在保存按钮 `title`。昵称不再单独输入，取 `getNick()`；「导入集锦」按钮与 textarea 已删，导入统一走「从剪贴板导入」+ `?imp=` 深链自动导入 |
 | 两个 tab 通用 | `buildSegs()` 在分类筛选/原片替换前存 `c.floatSegs`（全量片段）；全场 tab 播放序列压成单段整场，浮窗仍用 `floatSegs` 渲染，自定义片段不因切 tab 消失；全场点行走 `seekStream(t)` 按原片时间 seek 不切段，高亮按画面时间落在哪个片段算 |
-| 编辑态自由播放 | `VCNCClips.studioOpen()` + `feed.js` 的 `isStudioFree()`：工作室打开时 tick 跳过段末预热/推进，快拖两档都不钳段（钳整场时长），进度条按整场算并显示「编辑（原片）」；不改 `SETTINGS.mode`、不打断进度，关闭即恢复连播 |
-| 慢动作图标 | `#cornerCtl .cbtn.slow` 三档用内联 SVG（乌龟 + 3/2/1 条速度线），统一 36px 方形；`data-rate` / 再点恢复常速 / `.on` 选中态不变，倍率在 `title` / `aria-label` |
+| 编辑会话（临时全视频） | `clips.js` 打开工作室调 `VCNC.enterStudio()` 记现场（模式/段号/时间），`isStudioFree()` 动态读面板：tick 跳过段末预热/推进/重播保护窗、看门狗不重新 prepare 段，快拖两档都钳整场 `videoDuration`，点片段行 `seekStream()` 不切段，进度条按 `0 ~ videoDuration` 算并显示「编辑（整场）」。保存片段时 `rebuildClips()` 只 `buildSegs()` 不 `stopAll+activate`，自由播放不被打断；关闭走 `closeStudio()` → `leaveStudio()` 按当前时间归位片段（`studioLanding()`：段内同点续播 / 间隙跳下一段 / 越过末段回末段），归位 `jumpTo` 期间 `studioLeaving` 压住 tick 抢判段末（3s 兜底）。**全程不写 `SETTINGS.mode`**，退出后原模式与片段连播语义不变 |
+| 慢动作图标 | `#cornerCtl .cbtn.slow` 三档用内联 SVG 分数（分子 1 + 分数线 + 分母 2/4/8，即 ½/¼/⅛），统一 36px 方形；SVG 文本 12px 等于 WebView 最小字号；`data-rate` / 再点恢复常速 / `.on` 选中态不变，倍率在 `title` / `aria-label` |
 | 评论区读写 | 两端 `/api/replies`（GET）、`/api/clips/publish`、`/api/clips/delete`（POST + 同源校验）；`BiliSocial.java` / `social.py` 各用 `x/v2/reply/add|del`，前端统一解析 `【VCNC集锦v1】` 格式。**发布＝追加不删旧**：增量（`pubSet`/`markPublished` 按 bvid 记已发起点，并上云端 `mineAll` 起点 diff 出新片段）与全量两条路，都只发新评论；同一个人的多条集锦评论读取端合并去重（按起点秒）成 `cloud.mineAll` |
 | 自动读回 | `clips.js` 2s 轮询 `VCNCSocial.getMe()`，登录态 false→true 或换场时拉一次；`-412` / 空结果按 30s 退避，防止把 IP 打进更长的黑名单 |
 | 分享导入 | `VC1.<base64url>.<crc8>`；`shareText` 桥发微信，H5 中转页 `share/index.html` 试 `vcncfootball://import?b=&d=`，微信拦下就用 `getClipboardText()` 桥 + 粘贴兜底；`MainActivity.handleIntent` 把码写成 `feed.html?imp=` |
 
-`_test/verify_clips_codec.js` 是免设备编解码回归（Node + 最小 DOM 桩，43 项，含
+`_test/verify_clips_codec.js` 是免设备编解码回归（Node + 最小 DOM 桩，47 项，含
 `updateLocal` 行内编辑、`pubSet`/`markPublished` 发布记录，以及 2026-11-15 UI 批次的
-时间戳按钮 / `studioOpen` / `floatSegs` / 编辑态自由播放 / 慢动作 SVG 源码契约）；
+时间戳按钮 / `studioOpen` / `floatSegs` / 编辑会话进入—关闭—轻量重建—整场进度条 /
+½¼⅛ 分数分母源码契约）；
 `_test/verify_share_page.js` 把微信中转页的内联脚本放进同一类 DOM 桩执行（11 项），
 防止 H5 页独立实现的 `crc8` / `base64url` 与 App 内 `clips.js` 漂移；
 `_test/verify_clips.js` 是真机 CDP 专项（DOM / 契约 / 混排配色 / 面板精简 /
 增量+全量发布按钮 / 行内编辑 / 分享 SVG 图标 / 「自定义」筛选与 nextIdx 过滤 /
-2s 自动隐藏 / 与播放画面同层 / 工作室开关 / 慢按钮 SVG / 全场 tab 通用，
-跑完自动删掉临时片段并切回原 tab）。
+2s 自动隐藏 / 与播放画面同层 / 工作室开关 / 分数图标分母 / 全场 tab 通用 /
+编辑会话进入—退出—模式不变—归位片段，跑完自动删掉临时片段并切回原 tab）。
 三条线里前两条已并入发布门禁的「集锦编解码回归」，第三条是每台真机的「集锦验收」。
 
 ---

@@ -638,7 +638,7 @@
       chips.appendChild(b);
     });
 
-    $('#csClose', box).addEventListener('click', function () { box.hidden = true; });
+    $('#csClose', box).addEventListener('click', function () { closeStudio(); });
     $('#csStart', box).addEventListener('click', setStart);
     $('#csEnd', box).addEventListener('click', setEnd);
     $('#csSave', box).addEventListener('click', saveClip);
@@ -775,8 +775,17 @@
     });
   }
 
+  /** 关闭编辑窗：先让播放器归位到片段序列，再退出「临时全视频」自由播放态。
+   *  顺序不能反 —— 归位的 jumpTo 期间仍需要「编辑态不判段末」的保护。 */
+  function closeStudio() {
+    if (!studio || studio.hidden) return;
+    callVCNC('leaveStudio');
+    studio.hidden = true;
+  }
   function openStudio(which) {
     studio = studio || buildStudio();
+    var wasHidden = studio.hidden;
+    if (wasHidden) callVCNC('enterStudio');   // 已开着不重复进入，避免覆盖进入现场
     studio.hidden = false;
     if (global.showChrome) global.showChrome();
     if (which === 'cloud') {
@@ -838,8 +847,10 @@
     parseGroups: parseGroups,
     loadCloud: loadCloud,
     openStudio: openStudio,
-    /** feed.js 用它判断「工作室是否打开」：打开期间播放不被集锦片段时间窗口约束，
-     *  段末自动推进 / 跨段快拖钳制一律放开，画面按完整原片连续播放。 */
+    closeStudio: closeStudio,
+    /** feed.js 用它判断「工作室是否打开」：打开期间临时进入完整原片时间轴，
+     *  段末自动推进 / 跨段快拖钳制一律放开；关掉由 leaveStudio 归位片段连播，
+     *  全程不改 SETTINGS.mode。 */
     studioOpen: function () { return !!(studio && !studio.hidden); },
     cloudState: function () { return cloud; },
     _init: init

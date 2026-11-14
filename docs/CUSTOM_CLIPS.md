@@ -206,17 +206,25 @@ VC1.eyJ2Ijox…
 （`起点 4:02` / `终点 4:19`），未设置时仍是「起点」「终点」；保存后 draft 清空自动还原。
 不再需要靠 toast 或保存按钮 `title` 回看区间。
 
-**③ 编辑态按完整原片播放**：`VCNCClips.studioOpen()` 暴露工作室开关，`feed.js` 的
-`isStudioFree()` 动态读取。工作室打开时：tick 跳过 `followPreheated()` 与段末
-`onSegmentEnd()`，单指快拖的线性/加速区都不再钳当前段（改钳整场 `videoDuration`，
-预览始终跟手同一 deck），进度条与副标题按整场时长显示（「编辑（原片）」）。
-video 元素加载的本就是整场流，集锦段只是时间窗口——放开约束即连续播完整画面，
-不打断当前进度、不改 `SETTINGS.mode`，关掉工作室立刻恢复集锦连播语义。
+**③ 编辑态＝临时进全视频，退出归位片段**：打开工作室调 `VCNC.enterStudio()` 记下现场
+（模式 / 段号 / 时间），`feed.js` 的 `isStudioFree()` 动态读面板状态。编辑期间画面可以
+自由穿过片段本身：tick 跳过 `followPreheated()` / 段末 `onSegmentEnd()` / 重播保护窗，
+卡死看门狗只轻推时间轴不重新 prepare 段，单指快拖两档都钳整场 `videoDuration`，
+点片段行走 `seekStream()` 不切段，进度条按 `0 ~ videoDuration` 算并显示「编辑（整场）」。
+**保存片段只重算 `segs`（`buildSegs()`）与浮窗，绝不 `stopAll()+activate()`**——否则
+刚保存就按片段重新起播，自由播放被拦腰打断。关闭统一走 `closeStudio()` →
+`VCNC.leaveStudio()`：按当前画面时间在重建后的序列里找落点（段内同点续播 / 间隙跳
+下一段段头 / 越过末段回末段），`jumpTo` 期间用 `studioLeaving` 窗口压住 tick 抢判
+段末（3s 兜底），并按进入时是否在播复位暂停状态。**全程不写 `SETTINGS.mode`**，
+所以「进入编辑临时全视频，退出后原模式不变」，模式也不会被写进存盘。
 
-**④ 慢动作形象按钮**：`#cornerCtl .cbtn.slow` 三档从 `0.5× / 0.25× / 0.125×` 文字改为
-内联 SVG（乌龟 = 慢放，上方速度线 3/2/1 条 = 越快越慢档），与其它图标按钮统一 36px
-方形；`data-rate`、再点恢复常速、选中态 `.on` 全部不变，倍率写进 `title` / `aria-label`。
+**④ 慢动作分数按钮**：`#cornerCtl .cbtn.slow` 三档从 `0.5× / 0.25× / 0.125×` 文字改为
+内联 SVG 分数（分子 1 + 分数线 + 分母 2 / 4 / 8），即 ½ / ¼ / ⅛，一眼看出倍率；
+与其它图标按钮统一 36px 方形，SVG 文本字号 12px 正好等于 WebView 最小字号（不会被
+强制放大压出边界）。`data-rate`、再点恢复常速、选中态 `.on` 全部不变，倍率写进
+`title` / `aria-label`。
 
-回归：`_test/verify_clips_codec.js` 43 项（新增 7 项源码契约 + `studioOpen`），
-`_test/verify_clips.js` 新增「工作室开关 / 慢按钮 SVG / 全场 tab 通用」三项真机断言
+回归：`_test/verify_clips_codec.js` 47 项（含编辑会话进入/关闭/轻量重建/整场进度条/
+点行不切段，以及分数分母 2/4/8 的源码契约）；`_test/verify_clips.js` 21 项真机断言，
+含「工作室开关 / 分数图标分母 / 全场 tab 通用 / 编辑会话进入—退出—模式不变—归位片段」
 （切 tab 后自动切回，临时片段照旧用 `__CDP_TMP__` 标记并删除）。

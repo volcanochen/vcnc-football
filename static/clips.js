@@ -667,10 +667,16 @@
     studio = studio || buildStudio();
     if (!studio || studio.hidden) return;
     var st = state(), bvid = st.bvid || '', me = getMe();
-    // 不用步骤说明文字：起点/终点按钮点亮表示已记下，具体区间放保存按钮的 title
+    // 按钮点亮时把确定下来的画面时钟直接写在按钮上，不用再去记 toast / title
     var bs = $('#csStart', studio), be = $('#csEnd', studio), sv = $('#csSave', studio);
-    if (bs) bs.classList.toggle('on', draft.start != null);
-    if (be) be.classList.toggle('on', draft.end != null);
+    if (bs) {
+      bs.textContent = draft.start == null ? '起点' : ('起点 ' + s2t(draft.start));
+      bs.classList.toggle('on', draft.start != null);
+    }
+    if (be) {
+      be.textContent = draft.end == null ? '终点' : ('终点 ' + s2t(draft.end));
+      be.classList.toggle('on', draft.end != null);
+    }
     if (sv) sv.title = (draft.start == null) ? '先点「起点」，播放到结束处再点「终点」'
       : (draft.end == null ? ('起点 ' + s2t(draft.start) + '，播放到结束处点「终点」')
         : ('保存 ' + s2t(draft.start) + ' → ' + s2t(draft.end) +
@@ -832,6 +838,9 @@
     parseGroups: parseGroups,
     loadCloud: loadCloud,
     openStudio: openStudio,
+    /** feed.js 用它判断「工作室是否打开」：打开期间播放不被集锦片段时间窗口约束，
+     *  段末自动推进 / 跨段快拖钳制一律放开，画面按完整原片连续播放。 */
+    studioOpen: function () { return !!(studio && !studio.hidden); },
     cloudState: function () { return cloud; },
     _init: init
   };

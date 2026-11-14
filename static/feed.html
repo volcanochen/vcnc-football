@@ -61,9 +61,10 @@
         <span class="csep"></span>
         <button class="cbtn track" id="btnTrack" type="button" title="跟踪球：算法自动追着球/持球人放大取景" aria-label="跟踪球"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V6a2 2 0 0 1 2-2h2"/><path d="M16 4h2a2 2 0 0 1 2 2v2"/><path d="M20 16v2a2 2 0 0 1-2 2h-2"/><path d="M8 20H6a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3.2" fill="currentColor" stroke="none"/></svg></button>
         <span class="csep"></span>
-        <button class="cbtn slow" data-rate="0.5">0.5×</button>
-        <button class="cbtn slow" data-rate="0.25">0.25×</button>
-        <button class="cbtn slow" data-rate="0.125">0.125×</button>
+        <!-- 慢动作三档：乌龟＝慢放，速度线越少＝越慢；title/aria-label 仍写明倍率 -->
+        <button class="cbtn slow" data-rate="0.5" type="button" title="慢动作 0.5 倍速（再点恢复常速）" aria-label="慢动作 0.5 倍速"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 3.5h16"/><path d="M6.5 6.5h11"/><path d="M9 9.5h6"/><path d="M6 18a6 4.5 0 0 1 12 0"/><path d="M6 18h12"/><path d="M18 15.8a2.2 2.2 0 0 1 0 4"/><circle cx="18.9" cy="17" r=".8" fill="currentColor" stroke="none"/><path d="M8.5 18.5 7 21.5M15.5 18.5 17 21.5"/><path d="M11 15.5c1.2-1.2 2.8-1.2 4 0"/></svg></button>
+        <button class="cbtn slow" data-rate="0.25" type="button" title="慢动作 0.25 倍速（再点恢复常速）" aria-label="慢动作 0.25 倍速"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 5h12"/><path d="M9 8.5h6"/><path d="M6 18a6 4.5 0 0 1 12 0"/><path d="M6 18h12"/><path d="M18 15.8a2.2 2.2 0 0 1 0 4"/><circle cx="18.9" cy="17" r=".8" fill="currentColor" stroke="none"/><path d="M8.5 18.5 7 21.5M15.5 18.5 17 21.5"/><path d="M11 15.5c1.2-1.2 2.8-1.2 4 0"/></svg></button>
+        <button class="cbtn slow" data-rate="0.125" type="button" title="慢动作 0.125 倍速（再点恢复常速）" aria-label="慢动作 0.125 倍速"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7h6"/><path d="M6 18a6 4.5 0 0 1 12 0"/><path d="M6 18h12"/><path d="M18 15.8a2.2 2.2 0 0 1 0 4"/><circle cx="18.9" cy="17" r=".8" fill="currentColor" stroke="none"/><path d="M8.5 18.5 7 21.5M15.5 18.5 17 21.5"/><path d="M11 15.5c1.2-1.2 2.8-1.2 4 0"/></svg></button>
       </div>
 
       <!-- 滑动调节 OSD（亮度/音量） -->

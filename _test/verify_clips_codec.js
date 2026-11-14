@@ -143,5 +143,30 @@ ok('发布记录按视频隔离', Object.keys(otherSet).length === 0);
 C.markPublished('BVAAAAAAAAAA', [{ s: 5 }]);
 ok('其它视频记录独立生效', C.pubSet('BVAAAAAAAAAA')['5'] === 1);
 
+// 8) 2026-11-15 UI 批次静态契约：时间戳按钮 / 工作室开关 / 全场 tab 通用 /
+//    编辑态自由播放 / 慢动作形象按钮（源码级，真机断言在 verify_clips.js）
+const feedSrc = fs.readFileSync(path.join(ROOT, 'static/feed.js'), 'utf8');
+const htmlSrc = fs.readFileSync(path.join(ROOT, 'static/feed.html'), 'utf8');
+ok('起点按钮点亮时写入时间戳',
+   /bs\.textContent\s*=\s*draft\.start\s*==\s*null\s*\?\s*'起点'\s*:\s*\('起点 '\s*\+\s*s2t\(draft\.start\)\)/.test(src));
+ok('终点按钮点亮时写入时间戳',
+   /be\.textContent\s*=\s*draft\.end\s*==\s*null\s*\?\s*'终点'\s*:\s*\('终点 '\s*\+\s*s2t\(draft\.end\)\)/.test(src));
+ok('工作室对外暴露 studioOpen 契约', typeof C.studioOpen === 'function' && C.studioOpen() === false);
+ok('全场 tab 保留 floatSegs 并用于浮窗渲染',
+   /this\.floatSegs\s*=\s*segs\.slice\(\)/.test(feedSrc) &&
+   /fullMode\s*\?\s*\(\(c && c\.floatSegs/.test(feedSrc));
+ok('全场 tab 点行按时间 seek 不切段',
+   /SETTINGS\.mode === 'full'\) \{ this\.seekStream/.test(feedSrc) &&
+   /ClipPlayer\.prototype\.seekStream\s*=\s*function/.test(feedSrc));
+ok('编辑态放开段末推进 / 快拖钳段 / 进度条按原片',
+   /function isStudioFree\(\)/.test(feedSrc) &&
+   /if \(!free && ct >= end - 0\.012\)/.test(feedSrc) &&
+   /target = free \? clamp\(target, 0, vdur/.test(feedSrc) &&
+   /var span = free \?/.test(feedSrc));
+ok('慢动作三档改为 SVG 图标且保留 data-rate',
+   (htmlSrc.match(/class="cbtn slow" data-rate="(0\.5|0\.25|0\.125)"/g) || []).length === 3 &&
+   (htmlSrc.match(/class="cbtn slow" data-rate="[^"]+"[^>]*><svg/g) || []).length === 3 &&
+   !/>0\.5×</.test(htmlSrc) && !/>0\.125×</.test(htmlSrc));
+
 console.log('\n结果：' + pass + ' PASS / ' + fail + ' FAIL');
 process.exit(fail ? 1 : 0);

@@ -19,7 +19,7 @@
   out.api = C ? ['forVideo', 'mineOnlyState', 'setMineOnly', 'localList', 'addLocal',
                  'delLocal', 'updateLocal', 'pubSet', 'markPublished',
                  'encodeShare', 'decodeShare', 'packComment', 'parseComment',
-                 'parseGroups', 'loadCloud', 'openStudio']
+                 'parseGroups', 'loadCloud', 'openStudio', 'studioOpen']
                  .filter(function (k) { return typeof C[k] !== 'function'; }) : ['(module missing)'];
 
   if (!C || !V) { out.pass = false; out.error = 'VCNCClips / VCNC 契约缺失'; return out; }
@@ -146,6 +146,8 @@
       if (typeof window.showChrome === 'function') window.showChrome();
       C.openStudio('make');
       out.steps.layer = { onPlay: vis(s) };
+      // 工作室打开 → 编辑态自由播放生效；关闭 → 恢复集锦连播语义
+      out.steps.studioFree = { on: !!(window.isStudioFree && window.isStudioFree()) };
       return wait(350)
         .then(function () {
           if (typeof window.goPage === 'function') window.goPage(0);
@@ -162,6 +164,7 @@
           out.steps.layer.onModal = vis(s);
           document.body.classList.remove('soc-modal-open');
           s.hidden = true;
+          out.steps.studioFree.off = !(window.isStudioFree && window.isStudioFree());
           return wait(350);
         });
     })
@@ -175,6 +178,31 @@
     })
     .then(function () {
       out.steps.restored = C.localList(bvid).length === before;
+      // 2026-11-15 批次：慢动作三档改形象图标；全场/集锦 tab 共用同一份片段列表
+      var slowBtns = document.querySelectorAll('#cornerCtl .cbtn.slow');
+      var svgCount = 0, textCount = 0;
+      for (var z = 0; z < slowBtns.length; z++) {
+        if (slowBtns[z].querySelector('svg')) svgCount++;
+        if (slowBtns[z].textContent.replace(/\s/g, '')) textCount++;
+      }
+      out.steps.slowIcons = { total: slowBtns.length, svg: svgCount, text: textCount };
+      var modeBefore = window.SETTINGS ? window.SETTINGS.mode : null;
+      if (typeof window.togglePlayMode !== 'function' || modeBefore !== 'hl') {
+        out.steps.fullTab = { skipped: true, mode: modeBefore };
+        return null;
+      }
+      window.togglePlayMode();                 // 切到「全场」tab
+      return wait(700).then(function () {
+        var c = (typeof window.activeClip === 'function') ? window.activeClip() : null;
+        var fl = (c && c.floatSegs) ? c.floatSegs.length : 0;
+        var rows = document.querySelectorAll('#sfBody .sf-row').length;
+        out.steps.fullTab = { mode: window.SETTINGS.mode, floatSegs: fl, rows: rows,
+                              ok: fl > 0 && rows > 1 && rows <= fl };
+        window.togglePlayMode();               // 恢复原 tab，别改用户全局状态
+        return wait(450);
+      });
+    })
+    .then(function () {
       var sd = out.steps.studio, f = out.steps.filter, fb = out.steps.filterBack;
       var v = out.verdict = {
         module: out.hasModule,
@@ -196,6 +224,11 @@
         filter: f.on && f.btnOn && f.allMine && f.shown > 0 && f.shown <= f.totalBefore,
         filterBack: fb.off && fb.rows === out.steps.filter.totalBefore,
         idle2s: out.steps.idleMs === 2000,
+        studioFree: !!(out.steps.studioFree && out.steps.studioFree.on === true &&
+                       out.steps.studioFree.off === true),
+        slowIcons: out.steps.slowIcons.total === 3 && out.steps.slowIcons.svg === 3 &&
+                   out.steps.slowIcons.text === 0,
+        fullTab: !!(out.steps.fullTab && out.steps.fullTab.ok === true),
         layer: !out.steps.layer.skipped &&
                out.steps.layer.onPlay.op === 1 && out.steps.layer.onPlay.pe !== 'none' &&
                out.steps.layer.onList.op === 0 && out.steps.layer.onList.pe === 'none' &&

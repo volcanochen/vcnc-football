@@ -158,6 +158,14 @@ var QN = readQn();
 var LEAD = 0.35;          // 段末预热提前量
 var PAD_MIN = 0, PAD_MAX = 15, PAD_STEP = 0.5;
 
+/** 工作室打开时进入「自由播放」：视频元素本来加载的就是整场流，
+ *  集锦段只是时间窗口。放开段末推进与快拖钳段，编辑时画面按完整原片连续播放，
+ *  不打断当前进度、不改 SETTINGS.mode（关掉工作室即恢复原来的连播语义）。 */
+function isStudioFree() {
+  return !!(window.VCNCClips && window.VCNCClips.studioOpen &&
+            window.VCNCClips.studioOpen());
+}
+
 /* 折叠屏 / 超高像素大屏（N6 展开 2480x2248）同时解码两路视频会把合成器压死：
    音频照走、画面冻住。这类设备只保留 1 路正在播的视频，备用 deck 预载到段首后
    保持暂停，段末硬切时 startDeck() 再 play()（首帧已解码，仍无黑帧）。
@@ -831,6 +839,9 @@ ClipPlayer.prototype.buildSegs = function (matched) {
                 src: it.src, user: it.user, cid: it.cid });
   }
   this.segTotal = segs.length;               // 筛选前的片段总数（设置页显示命中数）
+  /* 全量片段列表：分类筛选 / 原片单段替换之前保存。右侧浮窗在「全场」tab
+     下也用它渲染，保证自定义片段对「集锦 / 全场」两个 tab 通用。 */
+  this.floatSegs = segs.slice();
   // 集锦分类：按备注字符字面筛选（原片模式不筛）；筛完为空则回退全部并提示
   this.catEmpty = false;
   this.catActive = '';                       // 实际生效的筛选串（回退全部时为空）
@@ -1489,8 +1500,11 @@ ClipPlayer.prototype.tick = function (now) {
       this.replayGuardAt = null;
     }
   }
-  this.followPreheated(ct, end);
-  if (ct >= end - 0.012) { this.onSegmentEnd(); return; }
+  var free = isStudioFree();
+  // 工作室（编辑）打开时按完整原片播放：跳过段末预热/自动推进，
+  // 让 video.currentTime 自然越过段窗口，画面连续播下去。
+  if (!free) this.followPreheated(ct, end);
+  if (!free && ct >= end - 0.012) { this.onSegmentEnd(); return; }
   if (now - this.lastHud > 100) { this.lastHud = now; this.hud(ct, end); }
 };
 
@@ -1499,12 +1513,17 @@ ClipPlayer.prototype.hud = function (ct, end) {
   syncSegFloatActive();          // 当前段高亮 / 锁定态（有状态守卫，不随帧改 DOM）
   var seg = this.segs[this.idx];
   if (!seg) return;
-  var p = clamp((ct - seg.start) / Math.max(0.1, seg.dur), 0, 1);
+  // 编辑态按整场时长算进度，否则越过段窗口后进度条会一直钉在 100%
+  var free = isStudioFree();
+  var span = free ? Math.max(0.1, (this.videoDuration || (seg.start + seg.dur)) - seg.start)
+                  : Math.max(0.1, seg.dur);
+  var p = clamp((ct - seg.start) / span, 0, 1);
   this.fillEl.style.width = (p * 100).toFixed(1) + '%';
   var sub = dateStr(this.item.pubdate);
-  if (SETTINGS.mode === 'hl' && this.segs.length) sub += ' · 集锦 ' + (this.idx + 1) + '/' + this.segs.length;
+  if (free) sub += ' · 编辑（原片）';
+  else if (SETTINGS.mode === 'hl' && this.segs.length) sub += ' · 集锦 ' + (this.idx + 1) + '/' + this.segs.length;
   else sub += ' · 原片 ' + fmt(this.videoDuration);
-  if (SETTINGS.mode === 'hl' && this.catActive) {
+  if (!free && SETTINGS.mode === 'hl' && this.catActive) {
     sub += ' · 筛选「' + this.catActive + '」';
   }
   if (loopFor(this)) sub += ' · 单段循环';
@@ -3077,7 +3096,12 @@ function renderSegFloat(force) {
   var box = $('#sfBody');
   if (!box) return;
   var c = activeClip();
-  var segs = (c && c.segs && c.segs.length) ? c.segs : null;
+  /* 「全场」tab 的播放序列被压成单段整场，但右侧浮窗仍显示完整片段列表
+     （含自定义片段）：两个 tab 共用同一份片段，切 tab 只改播放方式。 */
+  var fullMode = (SETTINGS.mode === 'full');
+  var segs = fullMode
+    ? ((c && c.floatSegs && c.floatSegs.length) ? c.floatSegs : null)
+    : ((c && c.segs && c.segs.length) ? c.segs : null);
   /* 「自定义」按钮：只看自己创建的片段。只过滤显示，播放序列与 data-i 索引不动。 */
   var mineOnly = !!(window.VCNCClips && window.VCNCClips.mineOnlyState &&
                     window.VCNCClips.mineOnlyState());
@@ -3158,6 +3182,17 @@ function syncSegFloatActive() {
   var c = activeClip();
   var bv = (c && c.item && c.item.bvid) || '';
   var idx = c ? c.idx : -1;
+  /* 全场 tab：播放序列只有一整段，idx 恒 0；按画面时间落在哪个片段上高亮，
+     这样两个 tab 的浮窗都能指示「现在看到哪一段」。 */
+  var fullMode = (SETTINGS.mode === 'full');
+  if (fullMode && c && c.floatSegs && c.floatSegs.length && c.decks && c.decks[c.activeDeck]) {
+    var ct = c.decks[c.activeDeck].v.currentTime;
+    idx = -1;
+    for (var k = 0; k < c.floatSegs.length; k++) {
+      var fs = c.floatSegs[k];
+      if (ct >= fs.start - 0.01 && ct <= fs.start + fs.dur) { idx = k; break; }
+    }
+  }
   if (sfLastIdx === idx && sfLastBvid === bv && sfLastLoop === loopIdx) return;
   sfLastIdx = idx; sfLastBvid = bv; sfLastLoop = loopIdx;
   var rows = document.querySelectorAll('#sfBody .sf-row');
@@ -3190,10 +3225,12 @@ function syncSegFloatActive() {
 }
 
 /** 用户点浮窗行跳段（唯一入口）：
- *  - busy 中不丢弃，排队最后一个点击，切段完成后补跳（此前静默 return，
+ *  - 全场 tab：播放序列是单段整场，按片段起点直接 seek 到原片对应时间，不切段
+ *  - 集锦 tab：busy 中不丢弃，排队最后一个点击，切段完成后补跳（此前静默 return，
  *    用户感受「点了没反应」，随后段末自动推进播下一段 = 「点 A 播 A+1」）
  *  - 点当前段行 = 回到段头重播（此前也是 no-op，同样被误读成「播了下一段」） */
 ClipPlayer.prototype.userJump = function (i) {
+  if (SETTINGS.mode === 'full') { this.seekStream((this.floatSegs[i] || {}).start); return; }
   if (i < 0 || i >= this.segs.length) return;
   if (this.busy) {
     this.queuedJump = { i: i, opts: { user: true } };
@@ -3202,6 +3239,23 @@ ClipPlayer.prototype.userJump = function (i) {
   }
   if (i === this.idx) { this.replayCurrent(); return; }
   this.jumpTo(i, { user: true });
+};
+
+/** 全场 tab / 编辑态：直接把当前 deck seek 到原片时间轴上的 t 秒。
+ *  video 元素加载的就是整场流，不切段、不重建播放序列、不打断进度恢复机制。 */
+ClipPlayer.prototype.seekStream = function (t) {
+  if (!isFinite(t) || t < 0 || this.busy || this.idx < 0) return;
+  var cur = this.decks[this.activeDeck];
+  if (!cur) return;
+  var dur = this.videoDuration > 0 ? this.videoDuration : 0;
+  if (dur > 0) t = clamp(t, 0, Math.max(0, dur - 0.1));
+  revReset();
+  try { cur.v.currentTime = t; } catch (e) {}
+  if (this.hasAudio) { try { cur.a.currentTime = t; } catch (e) {} }
+  cam.track = null;
+  camCut(0);
+  this.resumePlay();
+  diag('seek stream t=' + t.toFixed(1));
 };
 
 /** 点当前段行：回到段头重播 */
@@ -3979,16 +4033,20 @@ function moveSeek(dxs) {
   var c = activeClip();
   var dt = seekDelta(dxs);
   var target = drag.seek0 + dt;
+  var free = isStudioFree();
   var far = Math.abs(dxs) > (window.innerWidth || 1) / 2;
+  var vdur = (c && c.videoDuration > 0) ? c.videoDuration : 0;
   if (far) {
-    // 加速区：钳到全片时间轴，允许跨段
-    if (c && c.segs.length) {
+    // 加速区：编辑态按整场时间轴放开；正常播放仍钳到片段序列，允许跨段
+    if (free && vdur > 0) target = clamp(target, 0, Math.max(0, vdur - 0.1));
+    else if (c && c.segs.length) {
       target = clamp(target, c.segs[0].start, c.segs[c.segs.length - 1].start + c.segs[c.segs.length - 1].dur);
     }
-    drag.seekTargetSeg = seekTargetSegIdx(c, target);
+    drag.seekTargetSeg = free ? null : seekTargetSegIdx(c, target);
   } else {
-    // 线性区：行为与旧版一致，钳在当前段内精调
-    target = clamp(target, seg.start, seg.start + seg.dur);
+    // 线性区：正常播放钳在当前段内精调；编辑态不钳段，整场随便拖
+    target = free ? clamp(target, 0, vdur > 0 ? vdur - 0.1 : (seg.start + seg.dur))
+                  : clamp(target, seg.start, seg.start + seg.dur);
     drag.seekTargetSeg = null;
   }
   drag.seekT = target;

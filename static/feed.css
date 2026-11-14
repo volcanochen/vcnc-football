@@ -1061,14 +1061,9 @@ body.segfloat-off .segfloat { display: none !important; }
   background: #00aeec;
   color: #fff;
 }
-/* 慢动作三档文字较长（0.125×），固定 36px 会溢出压字：按文字自适应宽度。
-   设备端 WebView 最小字号 12px，字号压不下去，只能用宽度换。 */
-#cornerCtl .cbtn.slow {
-  width: auto;
-  min-width: 34px;
-  padding: 0 5px;
-  white-space: nowrap;
-}
+/* 慢动作三档改用形象 SVG（乌龟 + 递减速度线）：与其余图标按钮统一 36px 方形，
+   不再靠 0.125× 这种长文字撑宽度；倍率写在 title / aria-label 里。 */
+#cornerCtl .cbtn.slow { padding: 0; }
 /* 单片段循环：锁定当前段，再点解除（入口只在播放控件里，浮窗行不再带锁） */
 #cornerCtl .cbtn.loop {
   border: 1px solid rgba(255, 255, 255, .22);

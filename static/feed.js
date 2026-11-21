@@ -731,14 +731,25 @@ function calibOcr(v) {
   if (xl < 0 || xl + 124 >= rw) return null;
   // 行界只在首个数字组的列范围里统计：黑楔边缘外漏的亮内容（斜边）在右侧，
   // 全区域统计会把行带拉到斜边上去，数字被挤到单元格半截导致全读错
-  var bandRows = 0, ry0 = -1, ry1 = -1;
+  var ry0 = -1, ry1 = -1, bestLen = 0, runStart = -1, lastRow = -1;
   var xr = Math.min(xl + 30, rw);
-  for (y = 0; y < rh; y++) {
+  for (y = 0; y <= rh; y++) {
     var rc = 0;
-    for (x = xl; x < xr; x++) if (g[y * rw + x] >= 110 && th[y * rw + x] >= 25) rc++;
-    if (rc >= 3) { if (ry0 < 0) ry0 = y; ry1 = y + 1; bandRows++; }
+    if (y < rh) for (x = xl; x < xr; x++) if (g[y * rw + x] >= 110 && th[y * rw + x] >= 25) rc++;
+    if (y < rh && rc >= 3) {
+      if (runStart < 0) runStart = y;
+      lastRow = y;
+      continue;
+    }
+    // 只取高度合法的连续行段：画面下缘常有草皮高光/灯光等零散亮点，
+    // 若把首尾亮行直接当带宽，噪声行会把 17 行的数字撑到 50+ 行，整帧被误判废掉。
+    if (runStart >= 0) {
+      var len = lastRow + 1 - runStart;
+      if (len >= 14 && len <= 45 && len >= bestLen) { bestLen = len; ry0 = runStart; ry1 = lastRow + 1; }
+      runStart = -1;
+    }
   }
-  if (ry0 < 0 || ry1 - ry0 < 14 || ry1 - ry0 > 45) return null;
+  if (ry0 < 0) return null;
   var digits = '';
   for (var k = 0; k < 8; k++) {
     var a = xl + CALIB_OFFS[k], b2 = a + 12, ink = 0;
@@ -813,8 +824,12 @@ async function autoCalibrate(clip) {
     document.body.appendChild(v);
     v.src = src;
     try { v.load(); } catch (e) {}
-    var times = [t1, t2, t3], samples = [];
-    for (var i = 0; i < 3; i++) {
+    // 采样点比需要的 3 个多留几处：单个画面上时间码被球员/灯光挡住是常态，
+    // 一帧读不出就换下一个点，不要在整场上半途放弃。
+    var times = [t1, t2, t3, t2 + 420, t3 - 600, Math.round(dur * 0.25), Math.round(dur * 0.75)];
+    var samples = [];
+    for (var i = 0; i < times.length; i++) {
+      if (samples.length >= 5) break;
       await new Promise(function (res) {                       // 等元数据
         var to = setTimeout(res, 15000);
         if (v.readyState >= 1) { clearTimeout(to); res(); }
@@ -834,10 +849,19 @@ async function autoCalibrate(clip) {
         sec = calibOcr(v);
       }
       diag('calib t=' + tWanted + ' ocr=' + (sec == null ? 'fail' : sec.toFixed(2)));
-      if (sec == null) throw new Error('ocr fail');
-      samples.push([tWanted, sec]);
+      if (sec != null) samples.push([tWanted, sec]);   // 读不出就跳过这个点
     }
-    var fit = calibFit(samples);
+    if (samples.length < 3) throw new Error('ocr fail');
+    // 多取到的样本里挑最优三元组：误读帧（偶尔一串数字全错）不会再把整场拖垮
+    var fit = null;
+    for (var a1 = 0; a1 < samples.length; a1++) {
+      for (var b1 = a1 + 1; b1 < samples.length; b1++) {
+        for (var c1 = b1 + 1; c1 < samples.length; c1++) {
+          var f = calibFit([samples[a1], samples[b1], samples[c1]]);
+          if (f && (!fit || Math.abs(f.b - 1) < Math.abs(fit.b - 1))) fit = f;
+        }
+      }
+    }
     if (!fit) { calib.done = 'fit-fail'; diag('calib fit fail ' + JSON.stringify(samples)); return; }
     calib.a = fit.a; calib.b = fit.b; calib.ok = true; calib.done = 'ok';
     calibSave(bvid);

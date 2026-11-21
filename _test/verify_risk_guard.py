@@ -209,7 +209,7 @@ print("[5c] feed 冷却期沿用过期缓存且 0 请求")
 server._RISK.update({"until": time.time() + 30, "streak": 1})
 server._FEED_CACHE.clear()
 stale = {"ok": True, "videos": [{"bvid": BV}], "offset": "", "hasMore": False}
-server._FEED_CACHE["first"] = (time.time() - 600, stale)
+server._FEED_CACHE["1"] = (time.time() - 600, stale)
 calls.clear()
 r5 = server.space_feed("", "")
 ck("沿用超过 5 分钟的旧列表", r5 is stale)

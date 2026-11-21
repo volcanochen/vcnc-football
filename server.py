@@ -827,16 +827,37 @@ def _is_football(title: str, desc: str) -> bool:
     return any(k in t for k in FOOTBALL_IN)
 
 
-def space_feed(offset: str, user_cookie: str = "") -> dict:
-    """拉取 VCNC 的空间动态（投稿视频流）。
+def _fmt_duration(sec) -> str:
+    """秒数 -> 'MM:SS' / 'H:MM:SS' 文本（前端直接显示该字段）。"""
+    try:
+        s = int(sec or 0)
+    except (TypeError, ValueError):
+        return ""
+    if s <= 0:
+        return ""
+    h, rem = divmod(s, 3600)
+    m, ss = divmod(rem, 60)
+    return f"{h}:{m:02d}:{ss:02d}" if h else f"{m}:{ss:02d}"
 
-    走 x/polymer/web-dynamic/v1/feed/space：带 buvid cookie 即可，无需 wbi 签名
-    （space/wbi/arc/search 已加风控 dm 参数，实测 -352 / 412）。
-    offset 为空表示第一页；data.offset 是下一页游标。
-    对 -352：刷新 buvid + 指数退避重试（4 次尝试）；同一 offset 5 分钟缓存。
+
+def space_feed(offset: str, user_cookie: str = "") -> dict:
+    """拉取 VCNC 的投稿视频流。
+
+    走 x/series/recArchivesByKeywords：面向 App 端的投稿列表接口，无 cookie
+    裸请求即 200 code=0，不需要 wbi / buvid，游客、新机、新 IP 均可直接访问
+    （原 x/polymer/web-dynamic/v1/feed/space 对游客已收紧：无 cookie 412，
+    带 buvid 返回空 items 软风控，故弃用）。
+    offset 契约保留：空表示第一页，非空视为页码字符串（老前端 / Android 端
+    透传不变）；hasMore 时返回下一页页码字符串。
+    对 -352：指数退避重试（4 次尝试）；同一页 5 分钟缓存。
     """
     off = (offset or "").strip()
-    key = off or "first"
+    try:
+        pn = max(1, int(off)) if off else 1
+    except ValueError:
+        pn = 1
+    ps = 30
+    key = str(pn)
     hit = _FEED_CACHE.get(key)
     if hit and time.time() - hit[0] < 300:
         return hit[1]
@@ -850,13 +871,10 @@ def space_feed(offset: str, user_cookie: str = "") -> dict:
         try:
             if attempt:
                 time.sleep({0: 0, 1: 1, 2: 3, 3: 6}.get(attempt, 6))
-            url = ("https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
-                   f"?host_mid={FEED_MID}&platform=web&features=itemOpusStyle")
-            if off:
-                url += "&offset=" + urllib.parse.quote(off)
-            cookie = fresh_buvid_cookie() if attempt else buvid_cookie()
-            cookie = (cookie + " " + (user_cookie or "").strip()).strip()
-            d = http_json_no_origin(url, cookie=cookie)
+            url = ("https://api.bilibili.com/x/series/recArchivesByKeywords"
+                   f"?mid={FEED_MID}&keywords=&ps={ps}&pn={pn}")
+            # 该接口不需要 buvid；仅透传用户登录 cookie（若配置了 SESSDATA）
+            d = http_json_no_origin(url, cookie=(user_cookie or "").strip())
             if is_risk_code(d.get("code")):
                 last = RuntimeError(f"动态接口风控 {d.get('code')}")
                 if risk_blocked():
@@ -864,26 +882,18 @@ def space_feed(offset: str, user_cookie: str = "") -> dict:
                 continue
             if d.get("code") != 0 or "data" not in d:
                 raise RuntimeError(f"动态接口失败：{d.get('message')}")
-            data = d["data"]
             all_v, football = [], []
-            for it in data.get("items") or []:
-                mod = (it.get("modules") or {})
-                md = mod.get("module_dynamic") or {}
-                major = md.get("major") or {}
-                if major.get("type") != "MAJOR_TYPE_ARCHIVE":
-                    continue
-                arc = major.get("archive") or {}
+            for arc in d["data"].get("archives") or []:
                 bvid = arc.get("bvid") or ""
                 if not bvid:
                     continue
-                ma = mod.get("module_author") or {}
                 o = {
                     "bvid": bvid,
                     "aid": arc.get("aid"),
                     "title": arc.get("title", ""),
-                    "pic": arc.get("cover", ""),   # 协议相对地址，前端补 https:
-                    "duration": arc.get("duration_text", ""),
-                    "pubdate": ma.get("pub_ts", 0),
+                    "pic": arc.get("pic", ""),     # 完整 http URL，前端可直接用
+                    "duration": _fmt_duration(arc.get("duration")),
+                    "pubdate": arc.get("pubdate", 0),
                     "desc": arc.get("desc", ""),
                 }
                 all_v.append(o)
@@ -891,15 +901,17 @@ def space_feed(offset: str, user_cookie: str = "") -> dict:
                     football.append(o)
             # 过滤后为空但原始有内容时不过滤（账号以足球为主，避免误杀）
             use = football if football else all_v
-            if not use:
-                # 账号有 454 个视频，返回空只可能是软风控，按失败处理走上层重试
+            if not use and pn == 1:
+                # 第一页为空只可能是软风控，按失败处理走上层重试；
+                # 翻页超出末页时返回空页属正常
                 last = RuntimeError("动态接口返回为空（疑似软风控）")
                 continue
+            has_more = len(all_v) >= ps
             out = {
                 "ok": True,
                 "videos": use,
-                "offset": data.get("offset", ""),
-                "hasMore": bool(data.get("has_more")),
+                "offset": str(pn + 1) if has_more else "",
+                "hasMore": has_more,
                 "filtered": bool(football) and len(football) < len(all_v),
             }
             if len(_FEED_CACHE) > 32:

@@ -1088,7 +1088,9 @@ q.put("high_quality", "1");
     // ---------------------------------------------------------------- 空间动态 feed（VCNC 足球账号）
     /** VCNC 的 B 站 UID（mid）：只播放该账号的足球视频 */
     static final long FEED_MID = 432185343L;
-    /** feed 缓存：offset -> JSON。动态接口对突发请求会返回 -352 风控，必须缓存降压 */
+    /** feed 每页条数（与桌面端 server.py 同为 30，hasMore 以此判断） */
+    static final int FEED_PS = 30;
+    /** feed 缓存：页码 -> JSON。动态接口对突发请求会返回 -352 风控，必须缓存降压 */
     static final Map<String, long[]> FEED_TS = new ConcurrentHashMap<>();
     static final Map<String, JSONObject> FEED_CACHE = new ConcurrentHashMap<>();
 
@@ -1126,10 +1128,9 @@ q.put("high_quality", "1");
     /**
      * feed 接口专用请求头。
      *
-     * 【实测】x/polymer/web-dynamic/v1/feed/space 对 Origin 头敏感：
-     * 带 Origin: https://www.bilibili.com 时要么返回 -352，要么返回 code=0 但
-     * items 为空（软风控）；去掉 Origin 后正常返回。其它接口（view/reply/playurl）
-     * 带 Origin 无此问题，因此只给 feed 用这组精简头。
+     * 精简头：只带 UA + Referer（+ 可选用户登录态），与桌面端
+     * http_json_no_origin 同语义。series 接口对 Origin 不敏感，
+     * 但保持精简头无副作用。
      */
     static Map<String, String> feedHeaders(String cookie) {
         Map<String, String> h = new LinkedHashMap<>();
@@ -1139,27 +1140,40 @@ q.put("high_quality", "1");
         return h;
     }
 
+    /** 秒数 -> "MM:SS" / "H:MM:SS" 文本（前端直接显示该字段，与桌面端 _fmt_duration 同语义） */
+    static String fmtDuration(long sec) {
+        if (sec <= 0) return "";
+        long h = sec / 3600, m = (sec % 3600) / 60, s = sec % 60;
+        return (h > 0)
+                ? String.format("%d:%02d:%02d", h, m, s)
+                : String.format("%d:%02d", m, s);
+    }
+
     /**
-     * 拉取 VCNC 的空间动态（投稿视频流）。
+     * 拉取 VCNC 的投稿视频流。
      *
-     * 【为什么走动态接口而不是 space/wbi/arc/search】实测 arc/search 已加风控：
-     * 带 wbi 签名 + buvid + dm_img_list 仍返回 -352 / HTTP 412。而
-     * x/polymer/web-dynamic/v1/feed/space 只要 buvid cookie 即可返回（无需 wbi 签名），
-     * 且本身就是按时间倒序的投稿流，天然适合做 feed。
+     * 【为什么走 x/series/recArchivesByKeywords 而不是 feed/space】实测
+     * x/polymer/web-dynamic/v1/feed/space 对游客已收紧：无 cookie 返回 HTTP 412
+     * 拦截页，带 buvid 返回 code=0 但 items 为空（软风控），换 IP / 刷 buvid 均无效。
+     * 而 x/series/recArchivesByKeywords 是面向 App 端的投稿列表接口：
+     * 无 cookie 裸请求即 200 code=0，不需要 wbi / buvid，游客、新机、新 IP 均可访问，
+     * 按 pubdate 倒序天然适合做 feed。
      *
-     * 分页：offset 为空表示第一页；响应里的 data.offset 是下一页游标（base64），
-     * data.has_more 表示是否还有。
+     * 分页：offset 契约保留——空表示第一页，非空视为页码字符串（前端透传不变）；
+     * hasMore 时返回下一页页码字符串。
      *
-     * 风控策略：对 -352 刷新 buvid + 指数退避重试（4 次尝试，间隔 1s/3s/6s）；
-     * 5 分钟缓存同一 offset，避免重复请求。userCookie 为用户提供的 SESSDATA
+     * 风控策略：对 -352 指数退避重试（4 次尝试，间隔 1s/3s/6s）；
+     * 5 分钟缓存同一页，避免重复请求。userCookie 为用户提供的 SESSDATA
      * （登录态请求风控阈值高得多，设置里可填）。
      */
     static JSONObject fetchSpaceFeed(String offset, String userCookie) throws Exception {
         String off = (offset == null) ? "" : offset.trim();
-        String cacheKey = off.isEmpty() ? "first" : off;
+        int pn = 1;
+        try { pn = Math.max(1, Integer.parseInt(off)); } catch (NumberFormatException ignored) { }
+        String cacheKey = String.valueOf(pn);
         JSONObject cached = FEED_CACHE.get(cacheKey);
         if (cached != null && System.currentTimeMillis() - FEED_TS.getOrDefault(cacheKey, new long[]{0})[0] < 300_000) {
-            Log.i(TAG, "feed cache HIT offset=" + cacheKey.substring(0, Math.min(8, cacheKey.length())));
+            Log.i(TAG, "feed cache HIT page=" + cacheKey);
             return cached;
         }
         // 冷却期内连退避重试都不发：把上一轮成功结果（哪怕超过 5 分钟）直接顶上，
@@ -1175,7 +1189,7 @@ q.put("high_quality", "1");
                 // -352 是该接口的 IP 级滑动窗口限流（实测每 2~3 次请求后封锁数分钟），
                 // 快速重试只会让窗口持续发热，退避要拉开：1s/3s/6s
                 if (attempt > 0) Thread.sleep(new long[]{0, 1000, 3000, 6000}[attempt]);
-                JSONObject r = fetchSpaceFeedOnce(off, attempt > 0, userCookie);
+                JSONObject r = fetchSpaceFeedOnce(pn, userCookie);
                 // 命中风控后断路器已经拉起，继续退避重试只会加热 IP 窗口，直接收手
                 if (r == null) { if (riskBlocked()) break; continue; }
                 if (FEED_CACHE.size() > 32) { FEED_CACHE.clear(); FEED_TS.clear(); }
@@ -1191,16 +1205,14 @@ q.put("high_quality", "1");
     }
 
     /** 单次请求；返回 null 表示 -352 需要重试 */
-    private static JSONObject fetchSpaceFeedOnce(String offset, boolean refreshBuvid, String userCookie) throws Exception {
-        StringBuilder u = new StringBuilder(
-                "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=")
-                .append(FEED_MID).append("&platform=web&features=itemOpusStyle");
-        if (!offset.isEmpty()) u.append("&offset=").append(java.net.URLEncoder.encode(offset, "UTF-8"));
-        String buvid = refreshBuvid ? freshBuvidCookie() : buvidCookie();
-        String cookie = (buvid + " " + (userCookie == null ? "" : userCookie.trim())).trim();
-        JSONObject d = new JSONObject(httpGetString(u.toString(), feedHeaders(cookie)));
+    private static JSONObject fetchSpaceFeedOnce(int pn, String userCookie) throws Exception {
+        // 该接口不需要 buvid；仅透传用户登录 cookie（若配置了 SESSDATA）
+        String u = "https://api.bilibili.com/x/series/recArchivesByKeywords?mid="
+                + FEED_MID + "&keywords=&ps=" + FEED_PS + "&pn=" + pn;
+        String cookie = (userCookie == null) ? "" : userCookie.trim();
+        JSONObject d = new JSONObject(httpGetString(u, feedHeaders(cookie)));
         if (isRiskCode(d.optInt("code"))) {
-            Log.w(TAG, "feed " + d.optInt("code") + " 风控（refreshBuvid=" + refreshBuvid + "），重试");
+            Log.w(TAG, "feed " + d.optInt("code") + " 风控，重试");
             return null;
         }
         if (d.optInt("code") != 0)
@@ -1208,20 +1220,12 @@ q.put("high_quality", "1");
         JSONObject data = d.optJSONObject("data");
         if (data == null) throw new RuntimeException("动态接口无数据");
 
-        JSONArray items = data.optJSONArray("items");
+        JSONArray archives = data.optJSONArray("archives");
         JSONArray all = new JSONArray();     // 原始列表（未过滤）
         JSONArray football = new JSONArray(); // 足球过滤后
-        if (items != null) {
-            for (int i = 0; i < items.length(); i++) {
-                JSONObject it = items.optJSONObject(i);
-                if (it == null) continue;
-                JSONObject mod = it.optJSONObject("modules");
-                if (mod == null) continue;
-                JSONObject md = mod.optJSONObject("module_dynamic");
-                if (md == null) continue;
-                JSONObject major = md.optJSONObject("major");
-                if (major == null || !"MAJOR_TYPE_ARCHIVE".equals(major.optString("type"))) continue;
-                JSONObject arc = major.optJSONObject("archive");
+        if (archives != null) {
+            for (int i = 0; i < archives.length(); i++) {
+                JSONObject arc = archives.optJSONObject(i);
                 if (arc == null) continue;
                 String bvid = arc.optString("bvid", "");
                 if (bvid.isEmpty()) continue;
@@ -1229,13 +1233,10 @@ q.put("high_quality", "1");
                 o.put("bvid", bvid);
                 o.put("aid", arc.optLong("aid"));
                 o.put("title", arc.optString("title", ""));
-                // cover 是协议相对地址（//i0.hdslb.com/...），前端补 https:
-                o.put("pic", arc.optString("cover", ""));
-                o.put("duration", arc.optString("duration_text", ""));
-                long pub = 0;
-                JSONObject ma = mod.optJSONObject("module_author");
-                if (ma != null) pub = ma.optLong("pub_ts", 0);
-                o.put("pubdate", pub);
+                // pic 是完整 http URL，前端可直接用
+                o.put("pic", arc.optString("pic", ""));
+                o.put("duration", fmtDuration(arc.optLong("duration", 0)));
+                o.put("pubdate", arc.optLong("pubdate", 0));
                 o.put("desc", arc.optString("desc", ""));
                 // 集锦系列：标题带「集锦」（实况录像+集锦 一体视频，时间戳在置顶评论）
                 o.put("hl", o.optString("title", "").contains("集锦"));
@@ -1245,21 +1246,31 @@ q.put("high_quality", "1");
         }
         // 过滤后为空但原始有内容时不过滤（账号以足球为主，避免误杀）
         JSONArray use = (football.length() > 0) ? football : all;
-        // 账号有 454 个视频，返回空只可能是被风控（软封锁：code=0 但 items 为空），
-        // 按失败处理，让上层走重试/缓存兜底，而不是给用户看「暂无可播放的视频」
+        // 第一页为空只可能是被风控（软封锁：code=0 但 archives 为空），
+        // 按失败处理，让上层走重试/缓存兜底，而不是给用户看「暂无可播放的视频」；
+        // 翻页超出末页时返回空页属正常
         if (use.length() == 0) {
-            Log.w(TAG, "feed 返回为空（疑似软风控），按失败处理");
-            return null;
+            if (pn == 1) {
+                Log.w(TAG, "feed 返回为空（疑似软风控），按失败处理");
+                return null;
+            }
+            JSONObject empty = new JSONObject();
+            empty.put("ok", true);
+            empty.put("videos", new JSONArray());
+            empty.put("offset", "");
+            empty.put("hasMore", false);
+            empty.put("filtered", false);
+            return empty;
         }
+        boolean hasMore = all.length() >= FEED_PS;
         JSONObject out = new JSONObject();
         out.put("ok", true);
         out.put("videos", use);
-        out.put("offset", data.optString("offset", ""));
-        out.put("hasMore", data.optBoolean("has_more", false));
+        out.put("offset", hasMore ? String.valueOf(pn + 1) : "");
+        out.put("hasMore", hasMore);
         out.put("filtered", football.length() > 0 && football.length() < all.length());
-        Log.i(TAG, "feed ok offset=" + (offset.isEmpty() ? "first" : offset.substring(0, Math.min(8, offset.length())))
-                + " all=" + all.length() + " football=" + football.length()
-                + " hasMore=" + out.optBoolean("hasMore"));
+        Log.i(TAG, "feed ok page=" + pn + " all=" + all.length() + " football=" + football.length()
+                + " hasMore=" + hasMore);
         return out;
     }
 
